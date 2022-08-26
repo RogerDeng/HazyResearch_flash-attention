@@ -51,14 +51,14 @@ void run_fmha_block_dgrad_fp16_sm80_loop_(const FMHA_dgrad_params &params, cudaS
 }
 
 void run_fmha_block_dgrad_fp16_sm80(const FMHA_dgrad_params &params, cudaStream_t stream) {
-    if (params.d == 16) {
-        using Kernel_traits = FMHA_kernel_traits<256, 16, 16, 1, 8, 0x08u>;
-        run_fmha_block_dgrad_fp16_sm80_loop_<Kernel_traits>(params, stream);
-    } else if (params.d == 32) {
-        using Kernel_traits = FMHA_kernel_traits<256, 32, 16, 1, 8, 0x08u>;
-        run_fmha_block_dgrad_fp16_sm80_loop_<Kernel_traits>(params, stream);
-    } else if (params.d == 64) {
-        using Kernel_traits = FMHA_kernel_traits<256, 64, 16, 1, 8, 0x100u>;
-        run_fmha_block_dgrad_fp16_sm80_loop_<Kernel_traits>(params, stream);
-    }
+    // if (params.d == 16) {
+    //     using Kernel_traits = FMHA_kernel_traits<256, 16, 16, 1, 8, 0x08u>;
+    //     run_fmha_block_dgrad_fp16_sm80_loop_<Kernel_traits>(params, stream);
+    // } else if (params.d == 32) {
+    //     using Kernel_traits = FMHA_kernel_traits<256, 32, 16, 1, 8, 0x08u>;
+    //     run_fmha_block_dgrad_fp16_sm80_loop_<Kernel_traits>(params, stream);
+    // } else if (params.d == 64) {
+    //     using Kernel_traits = FMHA_kernel_traits<256, 64, 16, 1, 8, 0x100u>;
+    //     run_fmha_block_dgrad_fp16_sm80_loop_<Kernel_traits>(params, stream);
+    // }
 }

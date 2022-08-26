@@ -41,7 +41,8 @@ template<
     // The number of rows of Q, K or V loaded by this tile.
     int ROWS_,
     // The number of columns.
-    int COLS
+    int COLS,
+    bool cutlass_layout = false
 >
 struct Gmem_tile_qkv {
 
@@ -61,6 +62,8 @@ struct Gmem_tile_qkv {
     static constexpr int ROWS_PER_LDG = Cta_tile::THREADS_PER_CTA / THREADS_PER_ROW;
     // The number of LDGs needed to load a chunk of the Q matrix.
     static constexpr int LDGS = DivUpConstexpr(ROWS, ROWS_PER_LDG);
+    static constexpr int ROWS_PER_WARP_PER_LDG = 32 / THREADS_PER_ROW;
+    static constexpr int ROWS_PER_WARP = 32 / THREADS_PER_ROW * LDGS;
 
     // Ctor.
     template< typename BInfo >
@@ -71,8 +74,10 @@ struct Gmem_tile_qkv {
         , ptr(reinterpret_cast<char *>(ptr_))
         , tidx_(tidx) {
 
+        int warp_idx = tidx / 32;
         // Compute the position in the sequence (within the CTA for the moment).
-        int row = tidx / THREADS_PER_ROW;
+        // int row = tidx / THREADS_PER_ROW;
+        int row = cutlass_layout ? (tidx % 32) / THREADS_PER_ROW + ROWS_PER_WARP * warp_idx: tidx / THREADS_PER_ROW;
         // Compute the position of the thread in the row.
         int col = tidx % THREADS_PER_ROW;
 
@@ -98,14 +103,24 @@ struct Gmem_tile_qkv {
     }
 
     inline __device__ void load() {
-        int row_ = tidx_ / THREADS_PER_ROW;
+        // int row_ = tidx_ / THREADS_PER_ROW;
+        int tidx = threadIdx.x;
+        int warp_idx = tidx / 32;
+        int row_ = cutlass_layout ? (tidx % 32) / THREADS_PER_ROW + ROWS_PER_WARP * warp_idx: tidx / THREADS_PER_ROW;
         const void *ptrs[LDGS];
         uint32_t preds[LDGS];
         #pragma unroll
         for( int ii = 0; ii < LDGS; ++ii ) {
             // ptrs[ii] = ptr + (int64_t)ii * ROWS_PER_LDG * row_stride_in_bytes;
-            ptrs[ii] = ptr + (uint32_t)ii * ROWS_PER_LDG * row_stride_in_bytes;
-            preds[ii] = ((row_ + ii * ROWS_PER_LDG) < min(ROWS, actual_seqlen));
+            // ptrs[ii] = ptr + (uint32_t)ii * ROWS_PER_LDG * row_stride_in_bytes;
+            // preds[ii] = ((row_ + ii * ROWS_PER_LDG) < min(ROWS, actual_seqlen));
+            if (!cutlass_layout) {
+                ptrs[ii] = ptr + (uint32_t)ii * ROWS_PER_LDG * row_stride_in_bytes;
+                preds[ii] = ((row_ + ii * ROWS_PER_LDG) < min(ROWS, actual_seqlen));
+            } else {
+                ptrs[ii] = ptr + (uint32_t)ii * ROWS_PER_WARP_PER_LDG * row_stride_in_bytes;
+                preds[ii] = ((row_ + ii * ROWS_PER_WARP_PER_LDG) < min(ROWS, actual_seqlen));
+            }
             fetch_[ii] = make_uint4(0, 0, 0, 0);
         }
 
@@ -381,6 +396,26 @@ struct Gmem_tile_mma_s : public Base {
                 dst.y = frag[ni][mi].reg(2);
                 dst.z = frag[ni][mi].reg(1);
                 dst.w = frag[ni][mi].reg(3);
+                if( mask.any_valid(mi, ni) ) {
+                    Base::store(dst, mi, ni);
+                }
+            }
+        }
+    }
+
+    // Store to global memory.
+    template<typename Mask, typename Fragment>
+    inline __device__ void store_cl(const Fragment (&frag)[N][M], const Mask& mask){
+        static_assert(Fragment::kStorageElements == 4);
+        #pragma unroll
+        for( int mi = 0; mi < M; mi++ ) {
+            #pragma unroll
+            for( int ni = 0; ni < N; ni++ ) {
+                uint4 dst;
+                dst.x = frag[ni][mi].raw_data()[0];
+                dst.y = frag[ni][mi].raw_data()[2];
+                dst.z = frag[ni][mi].raw_data()[1];
+                dst.w = frag[ni][mi].raw_data()[3];
                 if( mask.any_valid(mi, ni) ) {
                     Base::store(dst, mi, ni);
                 }

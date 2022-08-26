@@ -417,6 +417,25 @@ struct Hmma_tile {
     //     N_PER_WARP = MMAS_N * N_PER_MMA,
     //     K_PER_WARP = MMAS_K * K_PER_MMA;
 
+    using Shape = cutlass::gemm::GemmShape<MMAS_M * M_PER_MMA, MMAS_N * M_PER_MMA, K_PER_MMA>;
+    using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+    using Element = cutlass::half_t;
+    using ElementC = float;
+    // using LayoutA = cutlass::layout::RowMajor;
+    // Cutlass's Crosswise only supports at most 64
+    static constexpr int kCrosswise = std::min(Cta_tile::K, 64);
+    using LayoutA = cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<
+        cutlass::sizeof_bits<Element>::value, kCrosswise>;
+    using LayoutB = cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<
+        cutlass::sizeof_bits<Element>::value, kCrosswise>;
+
+    using WarpMma = typename cutlass::gemm::warp::DefaultMmaTensorOp<
+        Shape, InstructionShape, Element, LayoutA, Element, LayoutB, ElementC,
+        cutlass::layout::RowMajor, cutlass::arch::OpMultiplyAdd, 1, true>::Type;
+
+    static_assert(Shape::kM % InstructionShape::kM == 0);
+    static_assert(Shape::kM % InstructionShape::kN == 0);
+    static_assert(Shape::kM % InstructionShape::kK == 0);
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -51,14 +51,16 @@ struct Mask {
         const int quad = lane / 4;
         const int tid = (lane % 4) * 2;
         row = warp_m * 16 + quad;
-        col = warp_n * 16 + tid;
+        // col = warp_n * 16 + tid;
+        col = warp_n * Mma_tile::N_PER_MMA * Mma_tile::MMAS_N + tid;
     }
 
     inline __device__ bool is_valid(const int mi, const int ni, const int ii, const int jj) const {
 
         // ii and jj iterate over the 2x4 fragment
         // const int current_col = (Is_causal ? loop_step_idx * Cta_tile::N : 0) + ni * Mma_tile::N_PER_MMA_PER_CTA + col + (jj & 2) * 4 + (jj & 1);
-        const int current_col = ni * Mma_tile::N_PER_MMA_PER_CTA + col + (jj & 2) * 4 + (jj & 1);
+        // const int current_col = ni * Mma_tile::N_PER_MMA_PER_CTA + col + (jj & 2) * 4 + (jj & 1);
+        const int current_col = ni * Mma_tile::N_PER_MMA + col + (jj & 2) * 4 + (jj & 1);
         const int current_row = row_offset + ii * 8;
         const bool col_valid = current_col < actual_seqlen_k;
         // const bool col_valid = (ni * Mma_tile::N_PER_MMA_PER_CTA + col + (jj & 2) * 4 + (jj & 1)) < actual_seqlen_k;

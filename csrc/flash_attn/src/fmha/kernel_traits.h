@@ -25,9 +25,11 @@
  *
  ******************************************************************************/
 
+#pragma once
+
 #include <cuda_fp16.h>
 
-#pragma once
+#include "cutlass/gemm/gemm.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -47,19 +49,19 @@ struct FMHA_kernel_traits {
     static constexpr bool V_IN_REGS = (FLAGS & 0x100u) == 0u;
 
     // The global memory tile to load Q.
-    using Gmem_tile_q = fmha::Gmem_tile_qkv<Cta_tile_p, fmha::BITS_PER_ELEMENT_A, STEP, D>;
+    using Gmem_tile_q = fmha::Gmem_tile_qkv<Cta_tile_p, fmha::BITS_PER_ELEMENT_A, STEP, D, true>;
 
     // The shared memory tile to swizzle Q.
-    // using Smem_tile_q = fmha::Smem_tile_a<Cta_tile_p, fmha::Row, Gmem_tile_q::BYTES_PER_LDG, 1>;
-    using Smem_tile_q = fmha::Smem_tile_a<Cta_tile_p, fmha::Row, Gmem_tile_q::BYTES_PER_LDG, 2>;
+    using Smem_tile_q = fmha::Smem_tile_a<Cta_tile_p, fmha::Row, Gmem_tile_q::BYTES_PER_LDG, 1>;
+    // using Smem_tile_q = fmha::Smem_tile_a<Cta_tile_p, fmha::Row, Gmem_tile_q::BYTES_PER_LDG, 2>;
 
     // The global memory tile to load K.
-    using Gmem_tile_k = fmha::Gmem_tile_qkv<Cta_tile_p, fmha::BITS_PER_ELEMENT_B, S, D>;
+    using Gmem_tile_k = fmha::Gmem_tile_qkv<Cta_tile_p, fmha::BITS_PER_ELEMENT_B, S, D, true>;
     // The shared memory tile to swizzle K.
     using Smem_tile_k = fmha::Smem_tile_b<Cta_tile_p, fmha::Col>;
 
     // The global memory tile to load V.
-    using Gmem_tile_v = fmha::Gmem_tile_qkv<Cta_tile_o, fmha::BITS_PER_ELEMENT_B, S, D>;
+    using Gmem_tile_v = fmha::Gmem_tile_qkv<Cta_tile_o, fmha::BITS_PER_ELEMENT_B, S, D, true>;
     // The shared memory tile to swizzle V.
     using Smem_tile_v = fmha::Smem_tile_v<Cta_tile_o>;
 
@@ -105,6 +107,16 @@ struct FMHA_kernel_traits {
     static constexpr int BYTES_PER_SMEM = fmha::MaxConstexpr(BYTES_PER_SMEM_QKV, BYTES_PER_SMEM_QO);
     // Make sure we have enough shared memory.
     static_assert(Smem_tile_q::BYTES_PER_TILE + Smem_tile_o::BYTES_PER_TILE <= BYTES_PER_SMEM, "");
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    using MmaInstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+    using MmaInstructionShape = cutlass::gemm::GemmShape<16, 8, 8>;
+#else
+    // using MmaInstructionShape = cutlass::gemm::GemmShape<8, 8, 4>;
+    using MmaInstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+    // TD [2022-06-02] We don't support Volta (SM70) yet.
+#endif
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

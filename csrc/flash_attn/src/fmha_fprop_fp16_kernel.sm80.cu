@@ -58,18 +58,23 @@ void run_fmha_fp16_sm80_loop_(Launch_params<FMHA_fprop_params> &launch_params,
     // Don't need smem_size_softmax_lse if we're not looping
     const int smem_size = fmha::get_dynamic_smem_size<Kernel_traits>()
         + (loop_steps > 1 ? smem_size_softmax_lse : 0);
+    // printf("smem_size = %d\n", smem_size);
 
     // Work-around for gcc 7. It doesn't like nested BOOL_SWITCH.
     // https://github.com/kokkos/kokkos-kernels/issues/349
     // https://github.com/HazyResearch/flash-attention/issues/21
     BOOL_SWITCH(launch_params.is_dropout, IsDropoutConst, [&] {
-        auto kernel = launch_params.params.is_causal
-            ? (launch_params.return_softmax
-               ? &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConst, true, true>
-               : &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConst, true, false>)
-            : (launch_params.return_softmax
-               ? &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConst, false, true>
-               : &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConst, false, false>);
+        // auto kernel = launch_params.params.is_causal
+        //     ? (launch_params.return_softmax
+        //        ? &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConst, true, true>
+        //        : &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConst, true, false>)
+        //     : (launch_params.return_softmax
+        //        ? &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConst, false, true>
+        //        : &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConst, false, false>);
+        constexpr bool IsDropoutConstTmp = false;
+        auto kernel = (launch_params.return_softmax
+               ? &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConstTmp, false, true>
+               : &fmha_fprop_fp16_sm80_loop_kernel<Kernel_traits, IsDropoutConstTmp, false, false>);
         if( smem_size >= 48 * 1024 ) {
             FMHA_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
@@ -84,34 +89,25 @@ void run_fmha_fp16_sm80_loop_(Launch_params<FMHA_fprop_params> &launch_params,
 void run_fmha_fp16_sm80(Launch_params<FMHA_fprop_params> &launch_params,
                         const bool configure) {
     BOOL_SWITCH(launch_params.params.is_bf16, IsBf16Const, [&] {
-        using elem_type = std::conditional<IsBf16Const, __nv_bfloat16, __half>::type;
+        // using elem_type = std::conditional<IsBf16Const, __nv_bfloat16, __half>::type;
+        using elem_type = __half;
         auto dprops = at::cuda::getCurrentDeviceProperties();
-        if (launch_params.params.d == 16) {
+        // if (launch_params.params.d == 32) {
+        //     if( launch_params.params.seqlen_k == 128 ) {
+        //         using Kernel_traits = FMHA_kernel_traits<128, 32, 16, 1, 4, 0x08u, elem_type>;
+        //         run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
+        //     } else if( launch_params.params.seqlen_k == 256 ) {
+        //         using Kernel_traits = FMHA_kernel_traits<256, 32, 16, 1, 4, 0x08u, elem_type>;
+        //         run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
+        //     } else {
+        //         using Kernel_traits = FMHA_kernel_traits<256, 32, 16, 1, 4, 0x08u, elem_type>;
+        //         run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
+        //     }
+        // } else if (launch_params.params.d == 64) {
+        if (launch_params.params.d <= 64) {
             if( launch_params.params.seqlen_k == 128 ) {
-                using Kernel_traits = FMHA_kernel_traits<128, 16, 16, 1, 4, 0x08u, elem_type>;
-                run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-            } else if( launch_params.params.seqlen_k == 256 ) {
-                using Kernel_traits = FMHA_kernel_traits<256, 16, 16, 1, 4, 0x08u, elem_type>;
-                run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-            } else {
-                // TD [2022-05-15] 512 gives wrong results rn
-                // using Kernel_traits = FMHA_kernel_traits<512, 16, 16, 1, 4, 0x08u, elem_type>;
-                using Kernel_traits = FMHA_kernel_traits<256, 16, 16, 1, 4, 0x08u, elem_type>;
-                run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-            }
-        } else if (launch_params.params.d == 32) {
-            if( launch_params.params.seqlen_k == 128 ) {
-                using Kernel_traits = FMHA_kernel_traits<128, 32, 16, 1, 4, 0x08u, elem_type>;
-                run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-            } else if( launch_params.params.seqlen_k == 256 ) {
-                using Kernel_traits = FMHA_kernel_traits<256, 32, 16, 1, 4, 0x08u, elem_type>;
-                run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-            } else {
-                using Kernel_traits = FMHA_kernel_traits<256, 32, 16, 1, 4, 0x08u, elem_type>;
-                run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-            }
-        } else if (launch_params.params.d == 64) {
-            if( launch_params.params.seqlen_k == 128 ) {
+                // TD [2022-08-20]: One might expect that not sharing the smem between K & V
+                // could be faster, but seems like it's the same speed.
                 using Kernel_traits = FMHA_kernel_traits<128, 64, 16, 1, 4, 0x08u, elem_type>;
                 run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
             } else if( launch_params.params.seqlen_k >= 256 ) {
@@ -128,21 +124,23 @@ void run_fmha_fp16_sm80(Launch_params<FMHA_fprop_params> &launch_params,
                     }
                 }
             }
-        } else if (launch_params.params.d == 128) {
-            if( launch_params.params.seqlen_k == 128 ) {
-                using Kernel_traits = FMHA_kernel_traits<128, 128, 16, 1, 4, 0x08u, elem_type>;
-                run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-            } else {
-                if (dprops->major == 8 && dprops->minor >= 0 && !launch_params.is_dropout) {
-                    // TD [2022-06-05] Keep K in registers to reduce register spilling
-                    // Gives about 6% speedup compared to using block size 128.
-                    using Kernel_traits = FMHA_kernel_traits<256, 128, 16, 1, 4, 0x18u, elem_type>;
-                    run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-                } else {  // Need to use the same block size as backward
-                    using Kernel_traits = FMHA_kernel_traits<128, 128, 16, 1, 4, 0x08u, elem_type>;
-                    run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-                }
-            }
+        // } else if (launch_params.params.d == 128) {
+        } else if (launch_params.params.d <= 128) {
+            // if( launch_params.params.seqlen_k == 128 ) {
+            //     using Kernel_traits = FMHA_kernel_traits<128, 128, 16, 1, 4, 0x08u, elem_type>;
+            //     run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
+            // } else {
+            //     if (dprops->major == 8 && dprops->minor == 0 && !launch_params.is_dropout) {
+            //         // TD [2022-06-05] Keep K in smem to reduce register spilling
+            //         // Gives about 6% speedup compared to using block size 128.
+            //         using Kernel_traits = FMHA_kernel_traits<256, 128, 16, 1, 4, 0x18u, elem_type>;
+            //         // using Kernel_traits = FMHA_kernel_traits<128, 128, 16, 1, 4, 0x08u, elem_type>;
+            //         run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
+            //     } else {  // Need to use the same block size as backward
+            //         using Kernel_traits = FMHA_kernel_traits<128, 128, 16, 1, 4, 0x08u, elem_type>;
+            //         run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
+            //     }
+            // }
         }
         // if (launch_params.params.d == 64) {
         //     // using Kernel_traits = FMHA_kernel_traits<128, 64, 16, 1, 4, 0x08u, elem_type>;
@@ -160,13 +158,13 @@ void run_fmha_fp16_sm80(Launch_params<FMHA_fprop_params> &launch_params,
         //             using Kernel_traits = FMHA_kernel_traits<256, 64, 16, 1, 4, 0x08u, elem_type>;
         //             run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
         //         } else if (dprops->major == 7 && dprops->minor == 5) {
-        //             if (launch_params.is_dropout) { // Need to use the same block size as backward
-        //                 using Kernel_traits = FMHA_kernel_traits<128, 64, 16, 1, 4, 0x08u, elem_type>;
-        //                 run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-        //             } else {
-        //                 using Kernel_traits = FMHA_kernel_traits<256, 64, 16, 1, 4, 0x08u, elem_type>;
-        //                 run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
-        //             }
+        //             // if (launch_params.is_dropout) { // Need to use the same block size as backward
+        //             //     using Kernel_traits = FMHA_kernel_traits<128, 64, 16, 1, 4, 0x08u, elem_type>;
+        //             //     run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
+        //             // } else {
+        //             //     using Kernel_traits = FMHA_kernel_traits<256, 64, 16, 1, 4, 0x08u, elem_type>;
+        //             //     run_fmha_fp16_sm80_loop_<Kernel_traits>(launch_params, configure);
+        //             // }
         //         }
         //     }
         // }

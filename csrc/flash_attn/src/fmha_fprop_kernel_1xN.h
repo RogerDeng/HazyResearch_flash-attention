@@ -32,18 +32,40 @@
 #include <fmha/kernel_traits.h>
 #include <fmha/gemm.h>
 #include <fmha/utils.h>
+#include <fmha/smem_cl.h>
+
+#include <fmha/mma_core_sm75.h>
+
+#include "cutlass/cutlass.h"
+#include "cutlass/layout/layout.h"
+#include <cutlass/array.h>
+#include <cutlass/numeric_types.h>
+#include "cutlass/numeric_conversion.h"
+#include <cutlass/arch/mma.h>
+#include "cutlass/gemm/warp/default_mma_tensor_op.h"
+#include "cutlass/gemm/warp/mma_tensor_op_tile_iterator.h"
+#include "cutlass/gemm/threadblock/default_mma_core.h"
+#include "cutlass/gemm/threadblock/default_mma_core_sm75.h"
+#include "cutlass/gemm/threadblock/default_mma_core_sm80.h"
+#include "cutlass/transform/threadblock/predicated_tile_iterator.h"
+#include "cutlass/epilogue/warp/fragment_iterator_tensor_op.h"
+#include "cutlass/epilogue/warp/tile_iterator_tensor_op.h"
+#include "cutlass/epilogue/threadblock/default_thread_map_tensor_op.h"
+#include "cutlass/epilogue/threadblock/default_epilogue_tensor_op.h"
+#include "cutlass/epilogue/threadblock/predicated_tile_iterator.h"
 
 namespace fmha {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits>
+template<typename Kernel_traits, typename WarpMma>
 struct Gemm_Q_K_base {
     using Smem_tile_o = typename Kernel_traits::Smem_tile_o;
     using Smem_tile_q = typename Kernel_traits::Smem_tile_q;
     using Smem_tile_k = typename Kernel_traits::Smem_tile_k;
     using Fragment_q = typename Smem_tile_q::Fragment;
     using Fragment_k = typename Smem_tile_k::Fragment;
+    using Smem_O_cl = fmha::Smem_epilogue<typename Kernel_traits::Cta_tile_o>;
 
     // The description of the CTA tile for the 1st batched GEMM.
     using Cta_tile_p = typename Kernel_traits::Cta_tile_p;
@@ -55,73 +77,148 @@ struct Gemm_Q_K_base {
 
     __device__ inline Gemm_Q_K_base(char * smem_ptr_q, char * smem_ptr_k, const int tidx) 
         : smem_q(smem_ptr_q, tidx)
-        , smem_k(smem_ptr_k, tidx) {
+        , smem_k(smem_ptr_k, tidx)
+        , smem_q_ptr(smem_ptr_q)
+        , smem_k_ptr(smem_ptr_k) {
 
     }
 
-    __device__ inline void load_q() {
-        smem_q.load(frag_q[0], 0);
+    // __device__ inline void load_q() {
+    //     smem_q.load(frag_q[0], 0);
+    // }
+    __device__ inline void load_q(int byte_offset=0) {
+        typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Cta_tile_p::M, Cta_tile_p::K});
+        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(smem_q_ptr + byte_offset), layout_A}, cutlass::arch::LaneId());
+        iter_A.load(frag_q_cl[0]);
     }
 
-    __device__ inline void reload_q() {
-        smem_q.load(frag_q[0], 0);
+
+    // __device__ inline void reload_q() {
+    //     smem_q.load(frag_q[0], 0);
+    // }
+
+    __device__ inline void reload_q(int byte_offset=0) {
+        typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Cta_tile_p::M, Cta_tile_p::K});
+        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(smem_q_ptr + byte_offset), layout_A}, cutlass::arch::LaneId());
+        iter_A.load(frag_q_cl[0]);
     }
 
     Fragment_q frag_q[2][Mma_tile_p::MMAS_M];
     Smem_tile_q smem_q;
     Smem_tile_k smem_k;
+    typename WarpMma::FragmentA frag_q_cl[2];
+    static_assert(WarpMma::FragmentA::kStorageElements == 4 || WarpMma::FragmentA::kStorageElements == 2);
+    char *smem_q_ptr;
+    char *smem_k_ptr;
 };
 
-template<typename Kernel_traits, bool K_in_regs, typename elem_type_=__half>
-struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
+template<typename Kernel_traits, typename WarpMma, bool K_in_regs, typename elem_type_=__half>
+struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
 
-    using Base = Gemm_Q_K_base<Kernel_traits>;
+    using Base = Gemm_Q_K_base<Kernel_traits, WarpMma>;
     using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
     using Fragment_k = typename Base::Fragment_k;
     using Mma_tile_p = typename Base::Mma_tile_p;
+    using Cta_tile_p = typename Base::Cta_tile_p;
     using elem_type = elem_type_;
+    using Smem_O_cl = typename Base::Smem_O_cl;
+
+    static constexpr int kIterations = WarpMma::Shape::kK / WarpMma::InstructionShape::kK;
 
     static constexpr bool SHARE_SMEM_FOR_K_AND_V = Kernel_traits::SHARE_SMEM_FOR_K_AND_V;
     // If V is stored in shared memory, we can't load K using the same shared memory.
     static_assert(Kernel_traits::V_IN_REGS);
 
     static constexpr int SMEM_OFFSET_O = Smem_tile_q::BYTES_PER_TILE;
-    static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + Smem_tile_o::BYTES_PER_TILE;
+    // static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + Smem_tile_o::BYTES_PER_TILE;
+    static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + sizeof(typename Smem_O_cl::SharedStorage);
     static constexpr int SMEM_OFFSET_V = Smem_tile_q::BYTES_PER_TILE + (SHARE_SMEM_FOR_K_AND_V ? 0 : Smem_tile_k::BYTES_PER_TILE);
 
     // Q | K / V
     //   | O | SOFTMAX
     static constexpr int SMEM_BYTES = Smem_tile_q::BYTES_PER_TILE 
                                     + std::max((SHARE_SMEM_FOR_K_AND_V ? 1 : 2) * Smem_tile_k::BYTES_PER_TILE,
-                                               Smem_tile_o::BYTES_PER_TILE + Base::SMEM_BYTES_SOFTMAX);
+                                               // Smem_tile_o::BYTES_PER_TILE + Base::SMEM_BYTES_SOFTMAX);
+                                               (int)sizeof(typename Smem_O_cl::SharedStorage) + Base::SMEM_BYTES_SOFTMAX);
 
     __device__ inline Gemm_Q_K(char * smem_, const int tidx) 
         : Base(smem_, smem_ + Smem_tile_q::BYTES_PER_TILE, tidx) {
     }
 
+    // __device__ inline void load_k(){
+    //     #pragma unroll
+    //     for( int ki = 0; ki < Mma_tile_p::MMAS_K; ++ki ) {
+    //         Base::smem_k.load(frag_k[ki], ki);
+    //     }
+    // }
+
     __device__ inline void load_k(){
+        // #pragma unroll
+        // for( int ki = 0; ki < Mma_tile_p::MMAS_K; ++ki ) {
+        //     Base::smem_k.load(frag_k[ki], ki);
+        // }
+        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+        //     printf("smem_k address = %p\n", smem);
+        // }
+        typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
+        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
+        int warp_idx = threadIdx.x / 32;
+        iter_B.add_tile_offset({0, warp_idx});
         #pragma unroll
-        for( int ki = 0; ki < Mma_tile_p::MMAS_K; ++ki ) {
-            Base::smem_k.load(frag_k[ki], ki);
+        for( int ki = 0; ki < kIterations; ++ki ) {
+            iter_B.load(frag_k_cl[ki]);
+            ++iter_B;
         }
+        // if ((threadIdx.x == 1) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+        //     uint32_t * frag_k_ptr = frag_k_cl[0].raw_data();
+        //     printf("frag_k_cl = \n");
+        //     for (int i = 0; i < 8; ++i) {
+        //         float2 tmp = __half22float2(reinterpret_cast<__half2 &>(frag_k_ptr[i]));
+        //         printf("%f, %f, ", tmp.x, tmp.y);
+        //     }
+        //     printf("\n");
+        //     printf("frag_k = \n");
+        //     for (int i = 0; i < 2; ++i) {
+        //         for (int j = 0; j < 4; ++j) {
+        //             float2 tmp = __half22float2(reinterpret_cast<__half2 &>(frag_k[0][i].reg(j)));
+        //             printf("%f, %f, ", tmp.x, tmp.y);
+        //         }
+        //     }
+        //     printf("\n");
+        // }
     }
 
-    template<typename Acc, int M, int N>
-    __device__ inline void operator()(Acc (&acc_p)[M][N]){
+    // template<typename Acc, int M, int N>
+    // __device__ inline void operator()(Acc (&acc_p)[M][N]){
+    //     // Do this part of P^T = (Q * K^T)^T.
+    //     #pragma unroll
+    //     for( int ki = 1; ki < Mma_tile_p::MMAS_K; ++ki ) {
+    //         // Trigger the load from shared memory for the next series of Q values.
+    //         Base::smem_q.load(Base::frag_q[ki & 1], ki);
+    //         // Do the math for the values already in registers.
+    //         fmha::gemm_cl<elem_type>(acc_p, Base::frag_q[(ki - 1) & 1], frag_k[(ki - 1)]);
+    //     }
+    //     // Do the final stage of math.
+    //     {
+    //         int ki = Mma_tile_p::MMAS_K;
+    //         fmha::gemm_cl<elem_type>(acc_p, Base::frag_q[(ki - 1) & 1], frag_k[(ki - 1)]);
+    //     }
+    // }
+
+    __device__ inline void operator()(WarpMma warp_mma, typename WarpMma::FragmentC &acc_p, int byte_offset_q=0){
+        typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Base::Cta_tile_p::M, Base::Cta_tile_p::K});
+        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_q_ptr + byte_offset_q), layout_A}, cutlass::arch::LaneId());
+        static_assert(WarpMma::FragmentA::kStorageElements == 4 || WarpMma::FragmentA::kStorageElements == 2);
+        ++iter_A;
         // Do this part of P^T = (Q * K^T)^T.
         #pragma unroll
-        for( int ki = 1; ki < Mma_tile_p::MMAS_K; ++ki ) {
+        for( int ki = 0; ki < kIterations; ++ki ) {
             // Trigger the load from shared memory for the next series of Q values.
-            Base::smem_q.load(Base::frag_q[ki & 1], ki);
+            if (ki + 1 < kIterations) { iter_A.load(Base::frag_q_cl[(ki + 1) % 2]); ++iter_A; }
             // Do the math for the values already in registers.
-            fmha::gemm_cl<elem_type>(acc_p, Base::frag_q[(ki - 1) & 1], frag_k[(ki - 1)]);
-        }
-        // Do the final stage of math.
-        {
-            int ki = Mma_tile_p::MMAS_K;
-            fmha::gemm_cl<elem_type>(acc_p, Base::frag_q[(ki - 1) & 1], frag_k[(ki - 1)]);
+            warp_mma(acc_p, Base::frag_q_cl[ki % 2], frag_k_cl[ki], acc_p);
         }
     }
 
@@ -130,17 +227,23 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
     }
 
     Fragment_k frag_k[Mma_tile_p::MMAS_K][Mma_tile_p::MMAS_N];
+    // typename Mma_tile_p::WarpMma::FragmentB frag_k_cl[Mma_tile_p::MMAS_K];
+    // static_assert(Mma_tile_p::WarpMma::FragmentB::kStorageElements == 4 * Mma_tile_p::MMAS_N);
+    // typename WarpMma::FragmentB frag_k_cl[Mma_tile_p::MMAS_K];
+    typename WarpMma::FragmentB frag_k_cl[kIterations];
+    static_assert(WarpMma::FragmentB::kStorageElements == 4 * Mma_tile_p::MMAS_N || WarpMma::FragmentB::kStorageElements == 2 * Mma_tile_p::MMAS_N);
 };
 
 
-template<typename Kernel_traits, typename elem_type_>
-struct Gemm_Q_K<Kernel_traits, false, elem_type_> : public Gemm_Q_K_base<Kernel_traits> {
-    using Base = Gemm_Q_K_base<Kernel_traits>;
+template<typename Kernel_traits, typename WarpMma, typename elem_type_>
+struct Gemm_Q_K<Kernel_traits, WarpMma, false, elem_type_> : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
+    using Base = Gemm_Q_K_base<Kernel_traits, WarpMma>;
     using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
     using Smem_tile_v = typename Kernel_traits::Smem_tile_v;
     using Fragment_k = typename Base::Fragment_k;
+    using Cta_tile_p = typename Base::Cta_tile_p;
     using Mma_tile_p = typename Base::Mma_tile_p;
     using elem_type = elem_type_;
     Fragment_k frag_k[2][Mma_tile_p::MMAS_N];
@@ -152,7 +255,7 @@ struct Gemm_Q_K<Kernel_traits, false, elem_type_> : public Gemm_Q_K_base<Kernel_
     static constexpr int SMEM_OFFSET_V = Smem_tile_q::BYTES_PER_TILE + (SHARE_SMEM_FOR_K_AND_V ? 0 : Smem_tile_k::BYTES_PER_TILE);
     static_assert(Smem_tile_v::BYTES_PER_TILE == (int) Smem_tile_k::BYTES_PER_TILE);
     static constexpr int SMEM_OFFSET_O = SMEM_OFFSET_V + Smem_tile_v::BYTES_PER_TILE;
-    static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + Smem_tile_o::BYTES_PER_TILE;
+    static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + Smem_tile_o::BYTES_PER_TILE + 2048;
 
     // If V_IN_REGS and SHARE_SMEM_FOR_K_AND_V:      Q | K/V | O | SOFTMAX
     // If !V_IN_REGS (then !SHARE_SMEM_FOR_K_AND_V): Q | K   | V | O | SOFTMAX
@@ -165,35 +268,89 @@ struct Gemm_Q_K<Kernel_traits, false, elem_type_> : public Gemm_Q_K_base<Kernel_
     }
 
     __device__ inline void load_k(){
-        Base::smem_k.load(frag_k[0], 0);
+        // Base::smem_k.load(frag_k[0], 0);
+        typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
+        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
+        int warp_idx = threadIdx.x / 32;
+        iter_B.add_tile_offset({0, warp_idx});
+        iter_B.load(frag_k_cl[0]);
     }
 
-    template<typename Acc, int M, int N>
-    __device__ inline void operator()(Acc (&acc_p)[M][N]){
+    // template<typename Acc, int M, int N>
+    // __device__ inline void operator()(Acc (&acc_p)[M][N]){
+    //     // Do this part of P^T = (Q * K^T)^T.
+    //     #pragma unroll
+    //     for( int ki = 1; ki < Mma_tile_p::MMAS_K; ++ki ) {
+    //         // Trigger the load from shared memory for the next series of Q values.
+    //         Base::smem_q.load(Base::frag_q[ki & 1], ki);
+    //         Base::smem_k.load(frag_k[ki & 1], ki);
+    //         // Do the math for the values already in registers.
+    //         fmha::gemm_cl<elem_type>(acc_p, Base::frag_q[(ki - 1) & 1], frag_k[(ki - 1) & 1]);
+    //     }
+    //     // Do the final stage of math.
+    //     {
+    //         int ki = Mma_tile_p::MMAS_K;
+    //         fmha::gemm_cl<elem_type>(acc_p, Base::frag_q[(ki - 1) & 1], frag_k[(ki - 1) & 1]);
+    //     }
+    // }
+
+    __device__ inline void operator()(WarpMma warp_mma, typename WarpMma::FragmentC &acc_p, int byte_offset_q=0){
+        typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Base::Cta_tile_p::M, Base::Cta_tile_p::K});
+        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(Base::smem_q_ptr + byte_offset_q), layout_A}, cutlass::arch::LaneId());
+        static_assert(WarpMma::FragmentA::kStorageElements == 4 || WarpMma::FragmentA::kStorageElements == 2);
+        ++iter_A;
+        typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
+        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
+        int warp_idx = threadIdx.x / 32;
+        iter_B.add_tile_offset({0, warp_idx});
+        ++iter_B;
         // Do this part of P^T = (Q * K^T)^T.
+        constexpr int kIterations = WarpMma::Shape::kK / WarpMma::InstructionShape::kK;
         #pragma unroll
-        for( int ki = 1; ki < Mma_tile_p::MMAS_K; ++ki ) {
+        for( int ki = 0; ki < kIterations; ++ki ) {
             // Trigger the load from shared memory for the next series of Q values.
-            Base::smem_q.load(Base::frag_q[ki & 1], ki);
-            Base::smem_k.load(frag_k[ki & 1], ki);
+            if (ki + 1 < kIterations) {
+                iter_A.load(Base::frag_q_cl[(ki + 1) % 2]); ++iter_A;
+                iter_B.load(frag_k_cl[(ki + 1) % 2]); ++iter_B;
+            }
             // Do the math for the values already in registers.
-            fmha::gemm_cl<elem_type>(acc_p, Base::frag_q[(ki - 1) & 1], frag_k[(ki - 1) & 1]);
+            warp_mma(acc_p, Base::frag_q_cl[ki % 2], frag_k_cl[ki % 2], acc_p);
         }
-        // Do the final stage of math.
-        {
-            int ki = Mma_tile_p::MMAS_K;
-            fmha::gemm_cl<elem_type>(acc_p, Base::frag_q[(ki - 1) & 1], frag_k[(ki - 1) & 1]);
-        }
+    }
+    __device__ inline void reload_k(){
+        // Base::smem_k.load(frag_k[0], 0);
+        typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
+        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
+        int warp_idx = threadIdx.x / 32;
+        iter_B.add_tile_offset({0, warp_idx});
+        iter_B.load(frag_k_cl[0]);
     }
 
-    __device__ inline void reload_k(){
-        Base::smem_k.load(frag_k[0], 0);
-    }
+    typename WarpMma::FragmentB frag_k_cl[2];
 };
 
 template<typename Kernel_traits>
 constexpr size_t get_dynamic_smem_size(){
-    return Gemm_Q_K<Kernel_traits, Kernel_traits::K_IN_REGS>::SMEM_BYTES;
+    using Cta_tile_p = typename Kernel_traits::Cta_tile_p;
+    using Mma_tile_p = fmha::Hmma_tile<Cta_tile_p>;
+
+    using InstructionShape = typename Kernel_traits::MmaInstructionShape;
+    using Element = cutlass::half_t;
+    using ElementAccum = float;
+
+    using ThreadblockShapeQK = cutlass::gemm::GemmShape<Cta_tile_p::M, Cta_tile_p::N, Cta_tile_p::K>;
+    using WarpShapeQK = cutlass::gemm::GemmShape<Cta_tile_p::M, 16 * Mma_tile_p::MMAS_N, Cta_tile_p::K>;
+    using LayoutP = cutlass::layout::RowMajor;
+    // Cutlass's Crosswise only supports at most 64
+    constexpr int kCrosswise = std::min(ThreadblockShapeQK::kK, 64);
+    using SmemLayoutQ = cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<
+        cutlass::sizeof_bits<Element>::value, kCrosswise>;
+    using SmemLayoutK = cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<
+        cutlass::sizeof_bits<Element>::value, kCrosswise>;
+    using WarpMmaQK = typename cutlass::gemm::warp::DefaultMmaTensorOp<
+        WarpShapeQK, InstructionShape, Element, SmemLayoutQ, Element, SmemLayoutK, ElementAccum,
+        LayoutP, cutlass::arch::OpMultiplyAdd, 1, true>::Type;
+    return Gemm_Q_K<Kernel_traits, WarpMmaQK, Kernel_traits::K_IN_REGS>::SMEM_BYTES;
 }
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Return_softmax, bool Is_first, bool Is_last, typename Params, typename Prng>
@@ -240,7 +397,40 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
     using Smem_softmax_sum = typename Kernel_traits::Smem_dp_sum;
 
-    using Gemm1 = Gemm_Q_K<Kernel_traits, Kernel_traits::K_IN_REGS, elem_type>;
+    using InstructionShape = typename Kernel_traits::MmaInstructionShape;
+    using Element = cutlass::half_t;
+    using ElementAccum = float;
+
+    using ThreadblockShapeQK = cutlass::gemm::GemmShape<Cta_tile_p::M, Cta_tile_p::N, Cta_tile_p::K>;
+    using WarpShapeQK = cutlass::gemm::GemmShape<Cta_tile_p::M, ThreadblockShapeQK::kN / Cta_tile_p::WARPS_N, Cta_tile_p::K>;
+    using LayoutQ = cutlass::layout::RowMajor;
+    using LayoutK = cutlass::layout::ColumnMajor;
+    using LayoutP = cutlass::layout::RowMajor;
+    using MmaCoreQK = typename fmha::FMHAMmaCore<
+        ThreadblockShapeQK, WarpShapeQK, InstructionShape, Element, LayoutQ,
+        Element, LayoutK, ElementAccum, LayoutP,
+        cutlass::arch::OpClassTensorOp>;
+    using WarpMmaQK = typename MmaCoreQK::MmaTensorOp;
+    using SmemLayoutQ = typename MmaCoreQK::SmemLayoutA;
+    using SmemLayoutK = typename MmaCoreQK::SmemLayoutB;
+    using SmemIteratorQ = typename MmaCoreQK::SmemIteratorA;
+    using SmemIteratorK = typename MmaCoreQK::SmemIteratorB;
+
+    using ThreadblockShapePV = cutlass::gemm::GemmShape<Cta_tile_o::M, Cta_tile_o::N, Cta_tile_o::K>;
+    using WarpShapePV = cutlass::gemm::GemmShape<Cta_tile_o::M, Cta_tile_o::N, ThreadblockShapePV::kK / Cta_tile_o::WARPS_K>;
+    using LayoutV = cutlass::layout::RowMajor;
+    using LayoutO = cutlass::layout::RowMajor;
+    using MmaCorePV = typename fmha::FMHAMmaCore<
+        ThreadblockShapePV, WarpShapePV, InstructionShape, Element, LayoutP,
+        Element, LayoutV, ElementAccum, LayoutO,
+        cutlass::arch::OpClassTensorOp>;
+    using WarpMmaPV = typename MmaCorePV::MmaTensorOp;
+    using WarpIteratorV = typename WarpMmaPV::IteratorB;
+    using SmemLayoutV = typename MmaCorePV::SmemLayoutB;
+    using SmemIteratorV = typename MmaCorePV::SmemIteratorB;
+    constexpr int kIterationsPV = WarpMmaPV::Shape::kK / WarpMmaPV::InstructionShape::kK;
+
+    using Gemm1 = Gemm_Q_K<Kernel_traits, WarpMmaQK, Kernel_traits::K_IN_REGS, elem_type>;
 
     using Softmax = fmha::Softmax<Cta_tile_p, Kernel_traits>;
 
@@ -294,6 +484,128 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // Allocate the shared memory tile loader for O. We use the same as K so be careful!!!
     Smem_tile_o smem_o(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
 
+    SmemLayoutQ layout_Q = SmemLayoutQ::packed({ThreadblockShapeQK::kM, ThreadblockShapeQK::kK});
+    SmemIteratorQ smem_q_cl({reinterpret_cast<Element *>(smem_), layout_Q}, tidx);
+    SmemLayoutK layout_K = SmemLayoutK::packed({ThreadblockShapeQK::kK, ThreadblockShapeQK::kN});
+    SmemIteratorK smem_k_cl({reinterpret_cast<Element *>(smem_ + Gemm1::Smem_tile_q::BYTES_PER_TILE), layout_K}, tidx);
+    SmemLayoutV layout_V = SmemLayoutV::packed({ThreadblockShapePV::kK, ThreadblockShapePV::kN});
+    SmemIteratorV smem_v_cl({reinterpret_cast<Element *>(smem_v_), layout_V}, tidx);
+    WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_), layout_V}, cutlass::arch::LaneId());
+
+    using Smem_O_cl = fmha::Smem_epilogue<Cta_tile_o>;
+    Smem_O_cl smem_o_cl(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
+    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+    //     printf("smem_o address = 0x%p\n", smem_ + Gemm1::SMEM_OFFSET_O);
+    // }
+
+    // Copy from mma_piplined_testbed.h
+    using GmemIteratorQ = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapeQK::kM, ThreadblockShapeQK::kK>,
+      Element,
+      LayoutQ,
+      0,
+      typename MmaCoreQK::IteratorThreadMapA
+    >;
+    LayoutQ gmem_layout_Q(params.q_row_stride_in_elts);
+    typename GmemIteratorQ::Params gmem_Q_params(gmem_layout_Q);
+    const uint32_t row_offset_q = binfo.sum_s_q * params.q_row_stride_in_elts + binfo.bidh * params.q_head_stride_in_elts;
+    const int seqlen_q_remainder = binfo.actual_seqlen_q % ThreadblockShapeQK::kM;
+    const int extent_q = ((binfo.actual_seqlen_q <= ThreadblockShapeQK::kM) || (seqlen_q_remainder == 0)) ? binfo.actual_seqlen_q : binfo.actual_seqlen_q + ThreadblockShapeQK::kM - seqlen_q_remainder;
+    GmemIteratorQ gmem_q_cl(gmem_Q_params,
+                            reinterpret_cast<Element *>(params.q_ptr) + row_offset_q,
+                            // {extent_q, ThreadblockShapeQK::kK},
+                            {extent_q, params.d},
+                            tidx);
+
+    using GmemIteratorK = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapeQK::kK, ThreadblockShapeQK::kN>,
+      Element,
+      LayoutK,
+      1,
+      typename MmaCoreQK::IteratorThreadMapB
+    >;
+    LayoutK gmem_layout_K(params.k_row_stride_in_elts);
+    typename GmemIteratorK::Params gmem_K_params(gmem_layout_K);
+    const uint32_t row_offset_k = (binfo.sum_s_k + loop_step_idx * ThreadblockShapeQK::kN) * params.k_row_stride_in_elts + binfo.bidh * params.k_head_stride_in_elts;
+    const int extent_k = min(binfo.actual_seqlen_k - loop_step_idx * ThreadblockShapeQK::kN, ThreadblockShapeQK::kN);
+    GmemIteratorK gmem_k_cl(gmem_K_params,
+                            reinterpret_cast<Element *>(params.k_ptr) + row_offset_k,
+                            // {ThreadblockShapeQK::kK, extent_k},
+                            {params.d, extent_k},
+                            tidx);
+
+    using GmemIteratorV = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapePV::kK, ThreadblockShapePV::kN>,
+      Element,
+      LayoutV,
+      0,
+      typename MmaCorePV::IteratorThreadMapB
+    >;
+    LayoutV gmem_layout_V(params.v_row_stride_in_elts);
+    typename GmemIteratorV::Params gmem_V_params(gmem_layout_V);
+    const uint32_t row_offset_v = (binfo.sum_s_k + loop_step_idx * ThreadblockShapePV::kK) * params.v_row_stride_in_elts + binfo.bidh * params.v_head_stride_in_elts;
+    // extent_v is the same as extent_k
+    GmemIteratorV gmem_v_cl(gmem_V_params,
+                            reinterpret_cast<Element *>(params.v_ptr) + row_offset_v,
+                            // {extent_k, ThreadblockShapePV::kN},
+                            {extent_k, params.d},
+                            tidx);
+
+    using GmemThreadMapO = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
+        ThreadblockShapePV,
+        WarpShapePV,
+        /*kPartitionsK=*/Cta_tile_o::WARPS_K,
+        Element,
+        /*ElementsPerAccess=*/4
+    >::Type;
+    using GmemIteratorO = cutlass::epilogue::threadblock::PredicatedTileIterator<
+      GmemThreadMapO,
+      Element
+    >;
+    using GmemThreadMapOaccum = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
+        ThreadblockShapePV,
+        WarpShapePV,
+        /*kPartitionsK=*/Cta_tile_o::WARPS_K,
+        ElementAccum,
+        /*ElementsPerAccess=*/4
+    >::Type;
+    using GmemIteratorOaccum = cutlass::epilogue::threadblock::PredicatedTileIterator<
+      GmemThreadMapOaccum,
+      ElementAccum
+    >;
+
+    LayoutO gmem_layout_O(params.o_row_stride_in_elts);
+    typename GmemIteratorO::Params gmem_O_params(gmem_layout_O);
+    const uint32_t row_offset_o = binfo.sum_s_q * params.o_row_stride_in_elts + binfo.bidh * params.o_head_stride_in_elts;
+    GmemIteratorO gmem_o_cl(gmem_O_params,
+                            reinterpret_cast<Element *>(params.o_ptr) + row_offset_o,
+                            // {extent_q, ThreadblockShapePV::kN},
+                            {binfo.actual_seqlen_q, params.d},
+                            tidx);
+
+    typename GmemIteratorOaccum::Params gmem_Oaccum_params(gmem_layout_O);
+    GmemIteratorOaccum gmem_o_accum_cl(gmem_Oaccum_params,
+                                       reinterpret_cast<ElementAccum *>(params.o_tmp_ptr) + row_offset_o,
+                                       {binfo.actual_seqlen_q, params.d},
+                                       tidx);
+
+    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+    //     printf("ThreadmapO kThreads = %d, kWarpCount = %d\n", OutputTileThreadMap::kThreads, OutputTileThreadMap::kWarpCount);
+    //     printf("ThreadmapO kColumn = %d, kRow = %d, kGroup = %d, kCluster = %d\n", OutputTileThreadMap::Iterations::kColumn, OutputTileThreadMap::Iterations::kRow, OutputTileThreadMap::Iterations::kGroup, OutputTileThreadMap::Iterations::kCluster);
+    //     printf("ThreadmapO kTile= %d\n", OutputTileThreadMap::Count::kTile);
+    //     printf("gmem_o_cl kITerations = %d\n", GmemIteratorO::kIterations);
+    //     printf("gmem_o_cl, Fragment::kElements = %d, kThreads = %d, kIterations = %d\n",
+    //            GmemIteratorO::Fragment::kElements, GmemIteratorO::kThreads, GmemIteratorO::kIterations);
+    //     printf("gmem_o STGS_PER_LOOP = %d\n", Gmem_tile_o::STGS_PER_LOOP);
+    // }
+
+    // #if 0
+    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y >= 0)) {
+    //     printf("GmemK Params k_row_stride_in_elts = %d\n", params.k_row_stride_in_elts);
+    //     printf("GmemK row_offsets in elts = %d\n", row_offset);
+    // }
+    // #endif
+
     if (!Is_first) {
         gmem_k.move(loop_step_idx);
         gmem_v.move(loop_step_idx);
@@ -301,11 +613,117 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     }
 
     // Trigger the loads for K.
-    gmem_k.load();
+    // gmem_k.load();
+    static_assert(GmemIteratorK::Fragment::kElements == decltype(gmem_k)::LDGS * 8);
+    typename GmemIteratorK::Fragment gmem_frag_k;
+    gmem_frag_k.clear();
+    gmem_k_cl.load(gmem_frag_k);
+
+    // #if 0
+    // if ((threadIdx.x == 97) && (blockIdx.x == 1) && (blockIdx.y == 3)) {
+    //     printf("gmem_frag_k = \n");
+    //     uint32_t *ptr = gmem_frag_k.raw_data();
+    //     for (int i = 0; i < 32; ++i) {
+    //         float2 tmp = __half22float2(reinterpret_cast<__half2 *>(ptr)[i]);
+    //         printf("%f %f ", tmp.x, tmp.y);
+    //     }
+    //     printf("\n");
+    //     printf("gmem_k.fetch_ = \n");
+    //     for (int i = 0; i < 8; ++i) {
+    //         for (int j = 0; j < 4; ++ j) {
+    //             float2 tmp = __half22float2(reinterpret_cast<__half2 *>(&gmem_k.fetch_[i])[j]);
+    //             printf("%f %f ", tmp.x, tmp.y);
+    //         }
+    //     }
+    //     printf("\n");
+    // }
+    // #endif
+
     // Trigger the loads for Q.
-    gmem_q.load();
+    // gmem_q.load();
+
+    static_assert(GmemIteratorQ::Fragment::kElements == decltype(gmem_q)::LDGS * 8);
+    typename GmemIteratorQ::Fragment gmem_frag_q;
+    gmem_frag_q.clear();
+    gmem_q_cl.load(gmem_frag_q);
+
+    // #if 1
+    // // if ((threadIdx.x == 37) && (blockIdx.x == 1) && (blockIdx.y == 3)) {
+    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+    //     printf("gmem_frag_q = \n");
+    //     uint32_t *ptr = gmem_frag_q.raw_data();
+    //     for (int i = 0; i < 4; ++i) {
+    //         float2 tmp = __half22float2(reinterpret_cast<__half2 *>(ptr)[i]);
+    //         printf("%f %f ", tmp.x, tmp.y);
+    //     }
+    //     printf("\n");
+    //     printf("gmem_q.fetch_ = \n");
+    //     for (int i = 0; i < 1; ++i) {
+    //         for (int j = 0; j < 4; ++ j) {
+    //             float2 tmp = __half22float2(reinterpret_cast<__half2 *>(&gmem_q.fetch_[i])[j]);
+    //             printf("%f %f ", tmp.x, tmp.y);
+    //         }
+    //     }
+    //     printf("\n");
+    // }
+    // #endif
+
+    // gmem_q.move();
+    // gmem_q.load();
+
+    // ++gmem_q_cl;
+    // gmem_frag_q.clear();
+    // gmem_q_cl.load(gmem_frag_q);
+
+    // #if 1
+    // // if ((threadIdx.x == 37) && (blockIdx.x == 1) && (blockIdx.y == 3)) {
+    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+    //     printf("gmem_frag_q = \n");
+    //     uint32_t *ptr = gmem_frag_q.raw_data();
+    //     for (int i = 0; i < 4; ++i) {
+    //         float2 tmp = __half22float2(reinterpret_cast<__half2 *>(ptr)[i]);
+    //         printf("%f %f ", tmp.x, tmp.y);
+    //     }
+    //     printf("\n");
+    //     printf("gmem_q.fetch_ = \n");
+    //     for (int i = 0; i < 1; ++i) {
+    //         for (int j = 0; j < 4; ++ j) {
+    //             float2 tmp = __half22float2(reinterpret_cast<__half2 *>(&gmem_q.fetch_[i])[j]);
+    //             printf("%f %f ", tmp.x, tmp.y);
+    //         }
+    //     }
+    //     printf("\n");
+    // }
+    // #endif
+
     // Trigger the loads for V.
-    gmem_v.load();
+    // gmem_v.load();
+
+    static_assert(GmemIteratorV::Fragment::kElements == decltype(gmem_v)::LDGS * 8);
+    typename GmemIteratorV::Fragment gmem_frag_v;
+    gmem_frag_v.clear();
+    gmem_v_cl.load(gmem_frag_v);
+
+    // #if 1
+    // if ((threadIdx.x == 97) && (blockIdx.x == 1) && (blockIdx.y == 3)) {
+    // // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+    //     printf("gmem_frag_v = \n");
+    //     uint32_t *ptr = gmem_frag_v.raw_data();
+    //     for (int i = 0; i < 32; ++i) {
+    //         float2 tmp = __half22float2(reinterpret_cast<__half2 *>(ptr)[i]);
+    //         printf("%f %f ", tmp.x, tmp.y);
+    //     }
+    //     printf("\n");
+    //     printf("gmem_v.fetch_ = \n");
+    //     for (int i = 0; i < 8; ++i) {
+    //         for (int j = 0; j < 4; ++ j) {
+    //             float2 tmp = __half22float2(reinterpret_cast<__half2 *>(&gmem_v.fetch_[i])[j]);
+    //             printf("%f %f ", tmp.x, tmp.y);
+    //         }
+    //     }
+    //     printf("\n");
+    // }
+    // #endif
 
     if (!Is_first) { __syncthreads(); }
 
@@ -315,8 +733,12 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     }
 
     // Commit the data for Q and V to shared memory.
-    gmem_q.commit(gemm_q_k.smem_q);
-    gmem_v.commit(smem_v);
+    // gmem_q.commit(gemm_q_k.smem_q);
+    // smem_q_cl.store(reinterpret_cast<typename SmemIteratorQ::Fragment(&)>(gmem_q.fetch_));
+    smem_q_cl.store(gmem_frag_q);
+    // gmem_v.commit(smem_v);
+    // smem_v_cl.store(reinterpret_cast<typename SmemIteratorV::Fragment(&)>(gmem_v.fetch_));
+    smem_v_cl.store(gmem_frag_v);
 
     // const uint32_t scale_bmm1 = reinterpret_cast<const uint32_t&>(params.scale_bmm1);
     // #pragma unroll
@@ -326,34 +748,76 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
     // Commit the data for K to shared memory.
     if( !Kernel_traits::SHARE_SMEM_FOR_K_AND_V ) {
-        gmem_k.commit(gemm_q_k.smem_k);
+        // gmem_k.commit(gemm_q_k.smem_k);
+        // smem_k_cl.store(reinterpret_cast<typename SmemIteratorK::Fragment(&)>(gmem_k.fetch_));
+        smem_k_cl.store(gmem_frag_k);
     }
 
     __syncthreads();
 
     // Load the fragments for Q.
-    gemm_q_k.load_q();
+    // gemm_q_k.load_q();
+    gemm_q_k.load_q(0 * Gemm1::Smem_tile_q::BYTES_PER_BUFFER);
 
-    // Load the fragments for V. We keep the data in registers during the entire kernel.
-    typename Smem_tile_v::Fragment frag_v[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_N];
+    // // Load the fragments for V. We keep the data in registers during the entire kernel.
+    // typename Smem_tile_v::Fragment frag_v[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_N];
+    // #pragma unroll
+    // for( int ki = 0; ki < Mma_tile_o::MMAS_K; ++ki ) {
+    //     smem_v.load(frag_v[ki], ki);
+    // }
+
+    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+    //     printf("smem_v_ address: %p\n", smem_v_);
+    // }
+    int warp_idx = threadIdx.x / 32;
+    // copied from mma_pipelined.h
+    // iter_V.add_tile_offset({Mma_tile_o::MMAS_K * warp_idx, 0});
+    // typename WarpIteratorV::Fragment frag_v_cl[Mma_tile_o::MMAS_K];
+    iter_V.add_tile_offset({kIterationsPV * warp_idx, 0});
+    typename WarpIteratorV::Fragment frag_v_cl[kIterationsPV];
+    static_assert(WarpIteratorV::Fragment::kStorageElements == 4 * Mma_tile_o::MMAS_N || WarpIteratorV::Fragment::kStorageElements == 2 * Mma_tile_o::MMAS_N );
     #pragma unroll
-    for( int ki = 0; ki < Mma_tile_o::MMAS_K; ++ki ) {
-        smem_v.load(frag_v[ki], ki);
+    for( int ki = 0; ki < kIterationsPV; ++ki ) {
+        iter_V.load(frag_v_cl[ki]);
+        ++iter_V;
     }
 
-    // Commit the data for V to shared memory if it has not been done already.
+    // for (int ki = 0; ki < Mma_tile_o::MMAS_K; ++ki) {
+    //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+    //         uint32_t * frag_v_ptr = frag_v_cl[ki].raw_data();
+    //         printf("frag_v_cl = \n");
+    //         for (int i = 0; i < 4 * Mma_tile_o::MMAS_N; ++i) {
+    //             float2 tmp = __half22float2(reinterpret_cast<__half2 &>(frag_v_ptr[i]));
+    //             printf("%f, %f, ", tmp.x, tmp.y);
+    //         }
+    //         printf("\n");
+    //         printf("frag_v = \n");
+    //         for (int i = 0; i < Mma_tile_o::MMAS_N; ++i) {
+    //             for (int j = 0; j < 4; ++j) {
+    //                 float2 tmp = __half22float2(reinterpret_cast<__half2 &>(frag_v[ki][i].reg(j)));
+    //                 printf("%f, %f, ", tmp.x, tmp.y);
+    //             }
+    //         }
+    //         printf("\n");
+    //     }
+    // }
+
+    // Commit the data for K to shared memory if it has not been done already.
     if( Kernel_traits::SHARE_SMEM_FOR_K_AND_V ) {
         // Make sure we are done loading the fragments for K.
         __syncthreads();
 
         // Commit the data to shared memory for V.
-        gmem_k.commit(gemm_q_k.smem_k);
+        // gmem_k.commit(gemm_q_k.smem_k);
+        // smem_k_cl.store(reinterpret_cast<typename SmemIteratorK::Fragment(&)>(gmem_k.fetch_));
+        smem_k_cl.store(gmem_frag_k);
 
         // Make sure the data is in shared memory.
         __syncthreads();
     }
 
     // Load the fragments for K. 
+    // gemm_q_k.load_k();
     gemm_q_k.load_k();
 
     // Create the object to do the softmax.
@@ -366,24 +830,73 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         if((begin + l) * Cta_tile_p::M >= binfo.actual_seqlen_q) break;
 
         // Declare the accumulators for the 1st gemm.
-        fmha::Fragment_accumulator acc_p[Mma_tile_p::MMAS_M][Mma_tile_p::MMAS_N];
-        fmha::Clear_accumulator<typename fmha::Accumulator_type, Cta_tile_p::WARPS_K>::apply(acc_p);
+        // fmha::Fragment_accumulator acc_p[Mma_tile_p::MMAS_M][Mma_tile_p::MMAS_N];
+        // fmha::Clear_accumulator<typename fmha::Accumulator_type, Cta_tile_p::WARPS_K>::apply(acc_p);
+        // using WarpMmaQK = typename Mma_tile_p::WarpMma;
+        WarpMmaQK mma_qk;
+        typename WarpMmaQK::FragmentC acc_p;
+        acc_p.clear();
 
         // Do this part of P = Q * K^T.
-        gemm_q_k(acc_p);
+        // gemm_q_k(acc_p);
+        // gemm_q_k(mma_qk, acc_p, (l % 2) * Gemm1::Smem_tile_q::BYTES_PER_BUFFER);
+        gemm_q_k(mma_qk, acc_p);
 
         // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
         //     printf("acc_p=%.6f, %.6f\n", acc_p[0][0].elt(0), acc_p[0][0].elt(1));
         // }
 
         uint4 out[Gmem_tile_o::STGS_PER_LOOP];
-        if (!Is_first) { gmem_o_tmp.load(out, 0); }
+        // if (!Is_first) { gmem_o_tmp.load(out, 0); }
+        if (!Is_first) {
+            #pragma unroll
+            for (int iter = 0; iter < GmemIteratorOaccum::kIterations; ++iter) {
+                // out_cl = reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOaccum::Fragment::kElements>(&)>(out[iter]);
+                // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+                //     printf("out before: %d, %d, %d, %d\n", out[iter].x, out[iter].y, out[iter].z, out[iter].w);
+                // }
+                gmem_o_accum_cl.load(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOaccum::Fragment::kElements>(&)>(out[iter]));
+                gmem_o_accum_cl.move();
+                // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+                //     printf("byte offset = %d\n", iter * params.o_row_stride_in_elts * GmemIteratorOaccum::ThreadMap::Shape::kRow * sizeof(ElementAccum));
+                //     printf("out after: %d, %d, %d, %d\n", out[iter].x, out[iter].y, out[iter].z, out[iter].w);
+                // }
+            }
+        }
 
         // Trigger the load for the next Q values.
         if( l < steps - 1) {
             gemm_q_k.smem_q.move_to_next_write_buffer();
-            gmem_q.move();
-            gmem_q.load();
+            // gmem_q.move();
+            // gmem_q.load();
+            ++gmem_q_cl;
+            if ((l + 1 == steps - 1) && (binfo.actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
+                // TODO: this probably only works for head_dim = 64 and head_dim = 128, which is
+                // what we have right now. Maybe for head_dim = 32 or 96, this could be different.
+                const int row_idx = tidx / (GmemIteratorQ::Shape::kColumn / GmemIteratorQ::Fragment::kElements);
+                if (row_idx >= binfo.actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
+                    gmem_q_cl.clear_mask();
+                    // typename GmemIteratorQ::Mask mask;
+                    // gmem_q_cl.get_mask(mask);
+                    // printf("cleared mask, tidx = %d, row_idx = %d, mask = %x\n", tidx, row_idx, mask[0]);
+                }
+            //     const uint32_t row_offset_q_last = (binfo.sum_s_q + (l + 1) * ThreadblockShapeQK::kM) * params.q_row_stride_in_elts + binfo.bidh * params.q_head_stride_in_elts;
+            //     GmemIteratorQ gmem_q_last(gmem_Q_params,
+            //                               reinterpret_cast<Element *>(params.q_ptr) + row_offset_q_last,
+            //                               {binfo.actual_seqlen_q - l * ThreadblockShapeQK::kM, params.d},
+            //                               tidx);
+            //     gmem_q_last.load(gmem_frag_q);
+            //     if ((blockIdx.x == 0) && (blockIdx.y == 0)) {
+            //         typename GmemIteratorQ::Mask mask;
+            //         typename GmemIteratorQ::Mask mask_last;
+            //         gmem_q_cl.get_mask(mask);
+            //         gmem_q_last.get_mask(mask_last);
+            //         printf("tidx = %d, row_idx = %d, mask = %x, mask_last = %x\n", tidx, row_idx, mask[0], mask_last[0]);
+            //     }
+            // } else {
+            //     gmem_q_cl.load(gmem_frag_q);
+            }
+            gmem_q_cl.load(gmem_frag_q);
         }
 
         // Load the mask for that iteration.
@@ -475,44 +988,79 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             softmax.template apply_dropout_16bits<encode_dropout_in_sign_bit>(ph0, ph1, params.p_dropout_in_uint16_t);
         }
 
-        using Frag_p = fmha::Fragment_a<fmha::Row>;
-        Frag_p frag_p[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_M];
+        // using Frag_p = fmha::Fragment_a<fmha::Row>;
         static_assert(Mma_tile_o::MMAS_M == Mma_tile_p::MMAS_M);
         static_assert(Mma_tile_o::MMAS_K == Mma_tile_p::MMAS_N);
-        softmax.template pack<elem_type>(frag_p);
+        softmax.pack_noconvert(acc_p);
+        cutlass::NumericArrayConverter<Element, ElementAccum, decltype(acc_p)::kElements, cutlass::FloatRoundStyle::round_to_nearest> convert_p;
+        auto frag_p = convert_p(acc_p);
+
         if (Return_softmax) {
-            gmem_s.store(frag_p, mask);
+            // gmem_s.store(frag_p, mask);
+            // gmem_s.template store<Mma_tile_o::MMAS_K, Mma_tile_o::MMAS_M>(frag_p, mask);
+            gmem_s.store_cl(reinterpret_cast<const cutlass::Array<Element, 8>(&)[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_M]>(frag_p), mask);
             gmem_s.move();
         }
 
         // Commit the values for Q into shared memory.
         if(l < steps - 1) {
-            gmem_q.commit(gemm_q_k.smem_q);
+            // gmem_q.commit(gemm_q_k.smem_q);
+            // smem_q_cl.store(reinterpret_cast<typename SmemIteratorQ::Fragment(&)>(gmem_q.fetch_));
+            // smem_q_cl.store_with_pointer_offset(reinterpret_cast<typename SmemIteratorQ::Fragment(&)>(gmem_q.fetch_), ((l + 1) % 2) * Gemm1::Smem_tile_q::BYTES_PER_BUFFER / sizeof(Element));
+            // smem_q_cl.store_with_pointer_offset(gmem_frag_q, ((l + 1) % 2) * Gemm1::Smem_tile_q::BYTES_PER_BUFFER / sizeof(Element));
+            smem_q_cl.store(gmem_frag_q);
         }
 
         if (Is_dropout && encode_dropout_in_sign_bit) {
-            #pragma unroll
-            for( int ki = 0; ki < Mma_tile_o::MMAS_K; ki++ ) {
-                #pragma unroll
-                for( int mi = 0; mi < Mma_tile_o::MMAS_M; mi++ ) {
-                    frag_p[ki][mi].template hrelu_<elem_type>();
-                }
-            }
+            // #pragma unroll
+            // for( int ki = 0; ki < Mma_tile_o::MMAS_K; ki++ ) {
+            //     #pragma unroll
+            //     for( int mi = 0; mi < Mma_tile_o::MMAS_M; mi++ ) {
+            //         frag_p[ki][mi].template hrelu_<elem_type>();
+            //     }
+            // }
+            cutlass::epilogue::thread::ReLu<decltype(frag_p)> relu;
+            frag_p = relu(frag_p);
         }
 
         // Declare the accumulators for the 2nd gemm.
         fmha::Fragment_accumulator acc_o[Mma_tile_o::MMAS_M][Mma_tile_o::MMAS_N];
-        fmha::Clear_accumulator<typename fmha::Accumulator_type, Cta_tile_o::WARPS_K>::apply(acc_o);
+        // fmha::Clear_accumulator<typename fmha::Accumulator_type, Cta_tile_o::WARPS_K>::apply(acc_o);
 
-        // Do this part of O = P^T * V^T.
+        // // Do this part of O = P^T * V^T.
+        // #pragma unroll
+        // for( int ki = 0; ki < Mma_tile_o::MMAS_K; ++ki ) {
+        //     fmha::gemm_cl<elem_type>(acc_o, frag_p[ki], frag_v[ki]);
+        //     // if ((threadIdx.x == 4) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
+        //     //     float2 tmp_p = __half22float2(reinterpret_cast<__half2 &>(frag_p[ki]));
+        //     //     float2 tmp_v = __half22float2(reinterpret_cast<__half2 &>(frag_v[ki]));
+        //     //     printf("Per warp, threadIdx.x = %d, frag_p = %.6f, %.6f, frag_v = %.6f, %.6f, acc_o=%.6f\n", threadIdx.x, tmp_p.x, tmp_p.y, tmp_v.x, tmp_v.y, acc_o[0][0].elt(0));
+        //     // }
+        // }
+
+        WarpMmaPV mma_pv;
+        typename WarpMmaPV::FragmentC acc_o_cl;
+        static_assert(WarpMmaPV::FragmentC::kElements == Mma_tile_o::MMAS_M * Mma_tile_o::MMAS_N * 8);
+        acc_o_cl.clear();
+
+        // For some reason, WarpMmaPV::FragmentA has length K * N * (8|4) instead of just N * (8|4).
+        // We we have to first cast frag_p to be array of k x (N * (8|4)), then cast each row to be
+        // an array of WarpMmaPV::FragmentA (which is what mma_pv expects).
+        static_assert(decltype(frag_p)::kElements == kIterationsPV * Mma_tile_o::MMAS_M * WarpMmaPV::FragmentA::kElements);
+        const auto frag_p_reshaped = reinterpret_cast<const cutlass::Array<Element, WarpMmaPV::FragmentA::kElements> (&)[kIterationsPV]>(frag_p);
         #pragma unroll
-        for( int ki = 0; ki < Mma_tile_o::MMAS_K; ++ki ) {
-            fmha::gemm_cl<elem_type>(acc_o, frag_p[ki], frag_v[ki]);
-            // if ((threadIdx.x == 4) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-            //     float2 tmp_p = __half22float2(reinterpret_cast<__half2 &>(frag_p[ki]));
-            //     float2 tmp_v = __half22float2(reinterpret_cast<__half2 &>(frag_v[ki]));
-            //     printf("Per warp, threadIdx.x = %d, frag_p = %.6f, %.6f, frag_v = %.6f, %.6f, acc_o=%.6f\n", threadIdx.x, tmp_p.x, tmp_p.y, tmp_v.x, tmp_v.y, acc_o[0][0].elt(0));
-            // }
+        for( int ki = 0; ki < kIterationsPV; ++ki ) {
+            mma_pv(acc_o_cl, reinterpret_cast<const typename WarpMmaPV::FragmentA(&)>(frag_p_reshaped[ki]), frag_v_cl[ki], acc_o_cl);
+        }
+        #pragma unroll
+        for( int mi = 0; mi < Mma_tile_o::MMAS_M; ++mi ) {
+            #pragma unroll
+            for( int ni = 0; ni < Mma_tile_o::MMAS_N; ++ni ) {
+                #pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    acc_o[mi][ni].elt(i) = acc_o_cl[mi * Mma_tile_o::MMAS_M * 8 + ni * 8 + i];
+                }
+            }
         }
 
         // if ((threadIdx.x % 32 == 16) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
@@ -551,7 +1099,130 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         static_assert(Gmem_tile_o::LOOPS == 1);
 
         // Swizzle the elements and do the final reduction.
-        smem_o.store(acc_o, 0);
+        // smem_o.store(acc_o, 0);
+
+        // using Shape = cutlass::gemm::GemmShape<16, Mma_tile_o::MMAS_N * 16, 16>;
+        // using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+        // using Element = cutlass::half_t;
+        // using ElementAccum = float;
+        // using LayoutA = cutlass::layout::RowMajor;
+        // using LayoutB = cutlass::layout::ColumnMajor;
+        // using LayoutC = cutlass::layout::RowMajor;
+        // using WarpMma = typename cutlass::gemm::warp::DefaultMmaTensorOp<
+        //     Shape, InstructionShape, Element, LayoutA, Element, LayoutB, ElementAccum,
+        //     LayoutC, cutlass::arch::OpMultiplyAdd, 1, true>::Type;
+
+        // constexpr int kPartitionsK = Mma_tile_o::MMAS_N;
+        // using OutputTileThreadMap = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
+        //   Shape,
+        //   typename WarpMma::Shape,
+        //   kPartitionsK,
+        //   float,
+        //   4
+        // >::Type;
+
+        // using DefaultIterators = cutlass::epilogue::threadblock::detail::DefaultIteratorsTensorOp<
+        //   float,
+        //   float,
+        //   4,
+        //   Shape,
+        //   typename WarpMma::Shape,
+        //   typename WarpMma::Policy::Operator::Shape,
+        //   typename OutputTileThreadMap::CompactedThreadMap
+        // >;
+        // using SharedLoadIterator = typename DefaultIterators::SharedLoadIterator;
+
+        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
+        //     printf("kElementsPerAccess: %d\n",  SharedLoadIterator::kElementsPerAccess);
+        //     printf("kThreads: %d\n",  SharedLoadIterator::kThreads);
+        //     printf("kLoadsPerAccess: %d\n",  SharedLoadIterator::kLoadsPerAccess);
+        //     printf("kColumn: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kColumn);
+        //     printf("kRow: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kRow);
+        //     printf("kGroup: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kGroup);
+        //     printf("kCluster: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kCluster);
+        //     printf("kTile: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kTile);
+        //     printf("Fragment kElements: %d\n",  SharedLoadIterator::Fragment::kElements);
+        //     printf("AccessType kElements: %d\n",  SharedLoadIterator::AccessType::kElements);
+        // }
+
+
+        // using AccumulatorFragmentIterator = cutlass::epilogue::warp::FragmentIteratorTensorOp<
+        //                                 typename WarpMma::Shape,
+        //                                 typename WarpMma::Policy::Operator::Shape,
+        //                                 typename WarpMma::Policy::Operator::ElementAccum,
+        //                                 typename WarpMma::Policy::Operator::FragmentC,
+        //                                 LayoutC>;
+        // using WarpTileIterator = cutlass::epilogue::warp::TileIteratorTensorOp<
+        //     typename WarpMma::Shape,
+        //     typename WarpMma::Policy::Operator::Shape,
+        //     typename WarpMma::Policy::Operator::ElementAccum,
+        //     LayoutC>;
+
+        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
+        //     printf("kAccessesPerInstruction: %d\n",  AccumulatorFragmentIterator::Policy::kIterationsPerInstruction);
+        //     printf("kAccumulatorRowStride: %d\n", AccumulatorFragmentIterator::Policy::kAccumulatorRowStride);
+        //     printf("kAccumulatorColumnStride: %d\n", AccumulatorFragmentIterator::Policy::kAccumulatorColumnStride);
+        //     printf("kColumn: %d\n",  AccumulatorFragmentIterator::Policy::OperatorCount::kColumn);
+        //     printf("kRow: %d\n",  AccumulatorFragmentIterator::Policy::OperatorCount::kRow);
+        //     printf("kIterations: %d\n",  AccumulatorFragmentIterator::Policy::kIterations);
+        //     printf("Fragment kElements: %d\n",  AccumulatorFragmentIterator::Fragment::kElements);
+        //     printf("AccumulatorTile kElements: %d\n",  AccumulatorFragmentIterator::AccumulatorTile::kElements);
+        //     printf("acc_o kElements: %d\n",  Mma_tile_o::MMAS_M * Mma_tile_o::MMAS_N * 8);
+        // }
+
+        // using Padding = cutlass::MatrixShape<0, 0>;
+        // // constexpr int FragmentsPerIteration = 2;  // TODO: could be 1 for Volta?
+        // constexpr int FragmentsPerIteration = 1;  // TODO: could be 1 for Volta?
+        // using EpilogueBase = typename cutlass::epilogue::threadblock::EpilogueBase<
+        //     Shape,
+        //     typename WarpMma::Shape,
+        //     kPartitionsK,
+        //     AccumulatorFragmentIterator,
+        //     WarpTileIterator,
+        //     Padding,
+        //     FragmentsPerIteration
+        // >;
+
+        // using SharedStorage = typename EpilogueBase::SharedStorage;
+        // const int lane_idx = tidx % 32;
+        // const int warp_idx = tidx / 32;
+        // // EpilogueBase epilogue(*reinterpret_cast<SharedStorage *>(&smem_[Gemm1::SMEM_OFFSET_O]),
+        // //                       tidx, warp_idx, lane_idx);
+        // constexpr int kSmemTiles = EpilogueBase::kFragmentsPerIteration;
+        // constexpr int kSmemPointerOffset = SharedStorage::StorageShape::kCount / kSmemTiles;
+
+        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
+        //     printf("EpilogueBase\n");
+        //     printf("StorageShape kRow: %d\n",  EpilogueBase::SharedStorage::StorageShape::kRow);
+        //     printf("StorageShape kColumn: %d\n",  EpilogueBase::SharedStorage::StorageShape::kColumn);
+        //     printf("StorageShape kCount: %d\n",  EpilogueBase::SharedStorage::StorageShape::kCount);
+        //     printf("Smem_tile_o size in bytes: %d\n", Smem_tile_o::BYTES_PER_TILE);
+        //     printf("kSmemTiles: %d\n", kSmemTiles);
+        //     printf("kSmemPointerOffset: %d\n", kSmemPointerOffset);
+        //     printf("out num uint4: %d\n", Gmem_tile_o::STGS_PER_LOOP);
+        //     printf("WARPS_K: %d\n", Cta_tile_o::WARPS_K);
+        // }
+
+        // __syncthreads();
+        smem_o_cl.store(reinterpret_cast<typename Smem_O_cl::AccumulatorTile(&)>(acc_o));
+
+        // __syncthreads();
+        // Smem_O_cl::store_static(
+        //     reinterpret_cast<typename Smem_O_cl::AccumulatorTile (&)>(acc_o),
+        //     &smem_[Gemm1::SMEM_OFFSET_O], tidx);
+
+        // // __syncthreads();
+        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
+        //     printf("Smem_o content from new Smem write\n");
+        //     for (int row = 0; row < 1; ++row) {
+        //         for (int col = 0; col < 64; ++col) {
+        //             printf("%f ", reinterpret_cast<float *>(&smem_[Gemm1::SMEM_OFFSET_O])[row * 64 + col]);
+        //         }
+        //         printf("\n");
+        //     }
+        // }
+
+        // __syncthreads();
 
         // Make sure the data is in shared memory.
         __syncthreads();
@@ -594,7 +1265,11 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                 out[jj] = fmha::fmul4(out[jj], p_prev_scale_o[jj]);
             }
         }
-        smem_o.template load</*zero_init=*/Is_first>(out);
+        // smem_o.template load</*zero_init=*/Is_first>(out);
+        // Smem_epilogue::template load</*zero_init=*/Is_first>(
+        //     reinterpret_cast<typename Smem_epilogue::OutputFragment (&)[Smem_epilogue::kFragmentsPerIteration]>(out),
+        //     &smem_[Gemm1::SMEM_OFFSET_O], tidx, l);
+        smem_o_cl.template load</*zero_init=*/Is_first>(reinterpret_cast<typename Smem_O_cl::OutputFragment (&)[Smem_O_cl::kFragmentsPerIteration]>(out), tidx, l);
 
         const bool is_final_write =
             Is_last
@@ -618,10 +1293,26 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         // Output the values.
         if (is_final_write) {
-            gmem_o.template store<elem_type>(out, 0);
+            // gmem_o.template store<elem_type>(out, 0);
             gmem_o.move();
+            typename GmemIteratorO::Fragment out_cl;
+            cutlass::NumericArrayConverter<Element, ElementAccum, decltype(out_cl)::kElements, cutlass::FloatRoundStyle::round_to_nearest> convert_o;
+            #pragma unroll
+            for (int iter = 0; iter < GmemIteratorO::kIterations; ++iter) {
+                out_cl = convert_o(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorO::Fragment::kElements>(&)>(out[iter]));
+                gmem_o_cl.store(out_cl);
+                gmem_o_cl.move();
+            }
         } else {
-            gmem_o_tmp.store(out, 0);
+            // gmem_o_tmp.store(out, 0);
+            typename GmemIteratorOaccum::Fragment out_cl;
+            #pragma unroll
+            if (!Is_first) { gmem_o_accum_cl.move(-GmemIteratorOaccum::kIterations); }
+            for (int iter = 0; iter < GmemIteratorOaccum::kIterations; ++iter) {
+                // out_cl = reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOaccum::Fragment::kElements>(&)>(out[iter]);
+                gmem_o_accum_cl.store(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOaccum::Fragment::kElements>(&)>(out[iter]));
+                gmem_o_accum_cl.move();
+            }
         }
 
         // Move to the next part of the output.
@@ -633,6 +1324,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Trigger the load from shared memory for the next series of Q values.
         if(l < steps - 1) {
             gemm_q_k.reload_q();
+            // gemm_q_k.reload_q(((l + 1) % 2) * Gemm1::Smem_tile_q::BYTES_PER_BUFFER);
         }
 
     }  // Outer loop over the sequence length.

@@ -1,4 +1,5 @@
 /******************************************************************************
+ * Copyright (c) 2022, Tri Dao.
  * Copyright (c) 2011-2021, NVIDIA CORPORATION.  All rights reserved.
  * 
  * Redistribution and use in source and binary forms, with or without
@@ -29,6 +30,9 @@
 
 #include <cmath>
 #include <cuda_fp16.h>
+
+#include "cutlass/cutlass.h"
+#include <cutlass/array.h>
 
 namespace fmha {
 
@@ -250,32 +254,6 @@ struct Softmax_base {
             }
         }
     }
-
-    // Apply the exp to all the elements.
-    template <bool max_in_base2=false>
-    inline __device__ void apply_exp_col(const float (&max)[MMAS_N * 4]) {
-        #pragma unroll
-        for( int ni = 0; ni < MMAS_N * 4; ++ni ) {
-            constexpr float kLog2e = M_LOG2E;
-            const float max_base2 = max_in_base2 ? max[ni] : max[ni] * kLog2e;
-            #pragma unroll
-            for( int mi = 0; mi < MMAS_M * 2; ++mi ) {
-                elt_[mi][ni] = apply_exp2_(elt_[mi][ni] * kLog2e, max_base2);
-            }
-        }
-    }
-    // inline __device__ void apply_exp_col(const float (&max)[MMAS_N]) {
-    //     constexpr float kLog2e = M_LOG2E;
-    //     #pragma unroll
-    //     for( int ni = 0; ni < MMAS_N * 4; ++ni ) {
-    //         float max_base2 = max_in_base2 ? max[ni / 4] : max[ni / 4] * kLog2e;
-    //         max_base2 = __shfl_sync(0xffffffff, max_base2, (ni % 4) * 8 + threadIdx.x % 8);
-    //         #pragma unroll
-    //         for( int mi = 0; mi < MMAS_M * 2; ++mi ) {
-    //             elt_[mi][ni] = apply_exp2_(elt_[mi][ni] * kLog2e, max_base2);
-    //         }
-    //     }
-    // }
 
     template <bool encode_dropout_in_sign_bit=false>
     inline __device__ void apply_dropout(Philox &ph, uint32_t p_dropout_in_uint) {
@@ -518,45 +496,62 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
         }
     }
 
-    // Scale FP32 fragments
-    inline __device__ void unpack(const Accumulator (&acc)[MMAS_M][MMAS_N]) {
-        const float scalef = reinterpret_cast<const float &>(this->params_scale_bmm1_);
-
+    // Pack the data to a fragment for the next GEMM.
+    inline __device__ void pack_noconvert(cutlass::Array<float, MMAS_M * MMAS_N * 8> &frag) const {
         #pragma unroll
         for( int mi = 0; mi < MMAS_M; ++mi ) {
             #pragma unroll
-            for( int ni = 0; ni < MMAS_N; ++ni ) {
+            for( int ki = 0; ki < MMAS_N; ++ki ) {
                 // 1st row - 4 elements per row.
-                this->elt_[2 * mi + 0][4 * ni + 0] = acc[mi][ni].elt(0) * scalef;
-                this->elt_[2 * mi + 0][4 * ni + 1] = acc[mi][ni].elt(1) * scalef;
-                this->elt_[2 * mi + 0][4 * ni + 2] = acc[mi][ni].elt(4) * scalef;
-                this->elt_[2 * mi + 0][4 * ni + 3] = acc[mi][ni].elt(5) * scalef;
+                frag[ki * MMAS_M * 8 + mi * 8 + 0] = this->elt_[2 * mi + 0][4 * ki + 0];
+                frag[ki * MMAS_M * 8 + mi * 8 + 1] = this->elt_[2 * mi + 0][4 * ki + 1];
+                frag[ki * MMAS_M * 8 + mi * 8 + 4] = this->elt_[2 * mi + 0][4 * ki + 2];
+                frag[ki * MMAS_M * 8 + mi * 8 + 5] = this->elt_[2 * mi + 0][4 * ki + 3];
                 // 2nd row - 4 elements per row.
-                this->elt_[2 * mi + 1][4 * ni + 0] = acc[mi][ni].elt(2) * scalef;
-                this->elt_[2 * mi + 1][4 * ni + 1] = acc[mi][ni].elt(3) * scalef;
-                this->elt_[2 * mi + 1][4 * ni + 2] = acc[mi][ni].elt(6) * scalef;
-                this->elt_[2 * mi + 1][4 * ni + 3] = acc[mi][ni].elt(7) * scalef;
+                frag[ki * MMAS_M * 8 + mi * 8 + 2] = this->elt_[2 * mi + 1][4 * ki + 0];
+                frag[ki * MMAS_M * 8 + mi * 8 + 3] = this->elt_[2 * mi + 1][4 * ki + 1];
+                frag[ki * MMAS_M * 8 + mi * 8 + 6] = this->elt_[2 * mi + 1][4 * ki + 2];
+                frag[ki * MMAS_M * 8 + mi * 8 + 7] = this->elt_[2 * mi + 1][4 * ki + 3];
             }
         }
     }
 
-    // Scale FP32 fragments
-    inline __device__ void unpack_noscale(const Accumulator (&acc)[MMAS_M][MMAS_N]) {
+    // inline __device__ void unpack_noscale(const Accumulator (&acc)[MMAS_M][MMAS_N]) {
+    //     #pragma unroll
+    //     for( int mi = 0; mi < MMAS_M; ++mi ) {
+    //         #pragma unroll
+    //         for( int ni = 0; ni < MMAS_N; ++ni ) {
+    //             // 1st row - 4 elements per row.
+    //             this->elt_[2 * mi + 0][4 * ni + 0] = acc[mi][ni].elt(0);
+    //             this->elt_[2 * mi + 0][4 * ni + 1] = acc[mi][ni].elt(1);
+    //             this->elt_[2 * mi + 0][4 * ni + 2] = acc[mi][ni].elt(4);
+    //             this->elt_[2 * mi + 0][4 * ni + 3] = acc[mi][ni].elt(5);
+    //             // 2nd row - 4 elements per row.
+    //             this->elt_[2 * mi + 1][4 * ni + 0] = acc[mi][ni].elt(2);
+    //             this->elt_[2 * mi + 1][4 * ni + 1] = acc[mi][ni].elt(3);
+    //             this->elt_[2 * mi + 1][4 * ni + 2] = acc[mi][ni].elt(6);
+    //             this->elt_[2 * mi + 1][4 * ni + 3] = acc[mi][ni].elt(7);
+    //         }
+    //     }
+    // }
 
+    template <typename FragmentC>
+    inline __device__ void unpack_noscale(const FragmentC (&acc)) {
+        static_assert(FragmentC::kElements == MMAS_M * MMAS_N * 8);
         #pragma unroll
         for( int mi = 0; mi < MMAS_M; ++mi ) {
             #pragma unroll
             for( int ni = 0; ni < MMAS_N; ++ni ) {
                 // 1st row - 4 elements per row.
-                this->elt_[2 * mi + 0][4 * ni + 0] = acc[mi][ni].elt(0);
-                this->elt_[2 * mi + 0][4 * ni + 1] = acc[mi][ni].elt(1);
-                this->elt_[2 * mi + 0][4 * ni + 2] = acc[mi][ni].elt(4);
-                this->elt_[2 * mi + 0][4 * ni + 3] = acc[mi][ni].elt(5);
+                this->elt_[2 * mi + 0][4 * ni + 0] = acc[mi * MMAS_N * 8 + ni * 8 + 0];
+                this->elt_[2 * mi + 0][4 * ni + 1] = acc[mi * MMAS_N * 8 + ni * 8 + 1];
+                this->elt_[2 * mi + 0][4 * ni + 2] = acc[mi * MMAS_N * 8 + ni * 8 + 4];
+                this->elt_[2 * mi + 0][4 * ni + 3] = acc[mi * MMAS_N * 8 + ni * 8 + 5];
                 // 2nd row - 4 elements per row.
-                this->elt_[2 * mi + 1][4 * ni + 0] = acc[mi][ni].elt(2);
-                this->elt_[2 * mi + 1][4 * ni + 1] = acc[mi][ni].elt(3);
-                this->elt_[2 * mi + 1][4 * ni + 2] = acc[mi][ni].elt(6);
-                this->elt_[2 * mi + 1][4 * ni + 3] = acc[mi][ni].elt(7);
+                this->elt_[2 * mi + 1][4 * ni + 0] = acc[mi * MMAS_N * 8 + ni * 8 + 2];
+                this->elt_[2 * mi + 1][4 * ni + 1] = acc[mi * MMAS_N * 8 + ni * 8 + 3];
+                this->elt_[2 * mi + 1][4 * ni + 2] = acc[mi * MMAS_N * 8 + ni * 8 + 6];
+                this->elt_[2 * mi + 1][4 * ni + 3] = acc[mi * MMAS_N * 8 + ni * 8 + 7];
             }
         }
     }

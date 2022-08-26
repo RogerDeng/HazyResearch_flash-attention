@@ -63,14 +63,14 @@ struct BlockInfoPadded {
         return actual_seqlen_k <= start_col;
     }
 
-    int actual_seqlen_q;
-    int actual_seqlen_k;
-    int sum_s_q;
-    int sum_s_k;
-    int bidh;
-    int bidb;
-    int tidx_global;
-    int h;
+    uint32_t actual_seqlen_q;
+    uint32_t actual_seqlen_k;
+    uint32_t sum_s_q;
+    uint32_t sum_s_k;
+    uint32_t bidh;
+    uint32_t bidb;
+    uint32_t tidx_global;
+    uint32_t h;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

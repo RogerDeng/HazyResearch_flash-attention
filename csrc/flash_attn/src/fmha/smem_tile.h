@@ -167,6 +167,9 @@ struct Smem_tile_without_skews {
             // ptrs[ii] = smem_ + offset + smem_write_buffer_;
             // smem_write_buffer_ is already merged with smem_write_offset_
             ptrs[ii] = smem_ + offset;
+            // if (((threadIdx.x == 0) || (threadIdx.x == 96) || (threadIdx.x == 127)) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+            //     printf("tidx = %d, smem_tile ii = %d, ptrs[ii] = 0x%x\n", threadIdx.x, ii, ptrs[ii]);
+            // }
         }
     }
 
@@ -655,6 +658,9 @@ struct Smem_tile_col_b : public Smem_tile_without_skews<Cta_tile,
             uint4 tmp;
             // ldsm(tmp, this->smem_ + this->smem_read_offset_ + this->smem_read_buffer_ + offset);
             ldsm(tmp, this->smem_ + this->smem_read_offset_ + offset);
+            // if (((threadIdx.x == 0) || (threadIdx.x == 1) || (threadIdx.x == 4)) && (blockIdx.x == 0) && (blockIdx.y) == 0) {
+            //     printf("smem_tile_k, tidx = %d, ldsm address = 0x%x\n", threadIdx.x, this->smem_ + this->smem_read_offset_ + offset);
+            // }
 
             // Store the value into the fragment.
             b[ni].reg(0) = tmp.x;
@@ -971,6 +977,9 @@ struct Smem_tile_v : public fmha::Smem_tile_without_skews<Cta_tile, Cta_tile::K,
             // Load the data using LDSM.MT88.2.
             uint4 tmp;
             fmha::ldsmt(tmp, this->smem_ + this->smem_read_offset_ + row * Base::BYTES_PER_ROW_BEFORE_PACKING);
+            // if (((threadIdx.x == 0) || (threadIdx.x == 1) || (threadIdx.x == 4)) && (blockIdx.x == 0) && (blockIdx.y) == 0) {
+            //     printf("tidx = %d, ldsmt address = 0x%x\n", threadIdx.x, this->smem_ + this->smem_read_offset_ + row * Base::BYTES_PER_ROW_BEFORE_PACKING);
+            // }
             b[ni].reg(0) = tmp.x;
             b[ni].reg(1) = tmp.y;
             b[ni].reg(2) = tmp.z;
@@ -1161,6 +1170,10 @@ struct Smem_tile_o {
                 // Store.
                 fmha::sts(this->smem_write_ + row_0, tmp0);
                 fmha::sts(this->smem_write_ + row_1, tmp1);
+                if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y) == 0) {
+                    printf("smem_o, row 0 address = 0x%p, ", uint32_t(this->smem_write_ + row_0));
+                    printf("row 1 address = 0x%p\n", uint32_t(this->smem_write_ + row_1));
+                }
             }
             // if ((threadIdx.x == 16) && (blockIdx.x == 0) && (blockIdx.y == 0))  {
             //     printf("smem_write diff = %d\n", this->smem_write_ - smem_write_og);
