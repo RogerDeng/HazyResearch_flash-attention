@@ -20,13 +20,15 @@ namespace fmha {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <typename Cta_tile>
-struct Smem_epilogue {
+template <typename Cta_tile_o>
+struct FMHAEpilogue {
 
     // The MMA tile.
-    using Mma_tile = fmha::Hmma_tile<Cta_tile>;
+    using Mma_tile = fmha::Hmma_tile<Cta_tile_o>;
 
-    using Shape = cutlass::gemm::GemmShape<16, Mma_tile::MMAS_N * 16, 16>;
+    // using Shape = cutlass::gemm::GemmShape<16, Mma_tile::MMAS_N * 16, 16>;
+    using ThreadblockShapePV = cutlass::gemm::GemmShape<Cta_tile_o::M, Cta_tile_o::N, Cta_tile_o::K>;
+    using WarpShapePV = cutlass::gemm::GemmShape<Cta_tile_o::M, Cta_tile_o::N, ThreadblockShapePV::kK / Cta_tile_o::WARPS_K>;
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
 #elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
@@ -41,10 +43,10 @@ struct Smem_epilogue {
     using LayoutB = cutlass::layout::ColumnMajor;
     using LayoutC = cutlass::layout::RowMajor;
     using WarpMma = typename cutlass::gemm::warp::DefaultMmaTensorOp<
-        Shape, InstructionShape, Element, LayoutA, Element, LayoutB, ElementC,
+        WarpShapePV, InstructionShape, Element, LayoutA, Element, LayoutB, ElementC,
         LayoutC, cutlass::arch::OpMultiplyAdd, 1, true>::Type;
 
-    static constexpr int kPartitionsK = Cta_tile::WARPS_K;
+    static constexpr int kPartitionsK = Cta_tile_o::WARPS_K;
 
     using AccumulatorFragmentIterator = cutlass::epilogue::warp::FragmentIteratorTensorOp<
                                     typename WarpMma::Shape,
@@ -56,26 +58,42 @@ struct Smem_epilogue {
     using AccumulatorTile = typename AccumulatorFragmentIterator::AccumulatorTile;
     static constexpr int kIterationsStore = AccumulatorFragmentIterator::kIterations;
 
-    using WarpTileIterator = cutlass::epilogue::warp::TileIteratorTensorOp<
-        typename WarpMma::Shape, typename WarpMma::Policy::Operator::Shape,
-        typename WarpMma::Policy::Operator::ElementC, LayoutC>;
-    static_assert(WarpTileIterator::kIterations == kIterationsStore);
+    // using WarpTileIterator = cutlass::epilogue::warp::TileIteratorTensorOp<
+    //     typename WarpMma::Shape, typename WarpMma::Policy::Operator::Shape,
+    //     typename WarpMma::Policy::Operator::ElementC, LayoutC>;
 
     // TODO: looks like elementsPerAccess should vary: 4 for d=64, 2 for d=32?
     using OutputTileThreadMap = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
-        Shape, typename WarpMma::Shape, kPartitionsK, float, /*ElementsPerAccess=*/4>::Type;
+        ThreadblockShapePV, typename WarpMma::Shape, kPartitionsK, Element, /*ElementsPerAccess=*/4>::Type;
+    using OutputTileThreadMapAccum = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
+        ThreadblockShapePV, typename WarpMma::Shape, kPartitionsK, ElementC, /*ElementsPerAccess=*/4>::Type;
+
+    using GmemIterator = cutlass::epilogue::threadblock::PredicatedTileIterator<
+        OutputTileThreadMap,
+        Element
+    >;
+    // TODO: which ThreadMap should we use?
+    using GmemIteratorAccum = cutlass::epilogue::threadblock::PredicatedTileIterator<
+        // OutputTileThreadMapAccum,
+        OutputTileThreadMap,
+        ElementC
+    >;
+
+
     using DefaultIterators = cutlass::epilogue::threadblock::detail::DefaultIteratorsTensorOp<
-        float, float, /*ElementsPerAccess=*/4, Shape, typename WarpMma::Shape,
+        Element, ElementC, /*ElementsPerAccess=*/4, ThreadblockShapePV, typename WarpMma::Shape,
         typename WarpMma::Policy::Operator::Shape, typename OutputTileThreadMap::CompactedThreadMap>;
-    // using WarpTileIterator = typename DefaultIterators::WarpTileIterator;
+    using WarpTileIterator = typename DefaultIterators::WarpTileIterator;
+    static_assert(WarpTileIterator::kIterations == kIterationsStore);
     using SharedLoadIterator = typename DefaultIterators::SharedLoadIterator;
     using OutputFragment = typename SharedLoadIterator::Fragment;
 
+    // using Padding = cutlass::MatrixShape<0, 0>;
     using Padding = cutlass::MatrixShape<0, 64 / cutlass::sizeof_bits<ElementC>::value * 4>;
     static constexpr int kFragmentsPerIteration = kIterationsStore;  // TODO: could be 1 for Volta?
     /*Using kIterationsStore here so that we get the right storage size*/
     using EpilogueBase = typename cutlass::epilogue::threadblock::EpilogueBase<
-        Shape, typename WarpMma::Shape, kPartitionsK, AccumulatorFragmentIterator, WarpTileIterator,
+        ThreadblockShapePV, typename WarpMma::Shape, kPartitionsK, AccumulatorFragmentIterator, WarpTileIterator,
         Padding, kIterationsStore>;
 
     using SharedStorage = typename EpilogueBase::SharedStorage;
@@ -86,7 +104,7 @@ struct Smem_epilogue {
     SharedStorage *shared_storage;
     WarpTileIterator warp_tile_iterator;
 
-    inline __device__ Smem_epilogue(void *smem, const int tidx)
+    inline __device__ FMHAEpilogue(void *smem, const int tidx)
         : shared_storage(reinterpret_cast<SharedStorage *>(smem))
         , warp_tile_iterator(shared_storage->reference(), cutlass::arch::LaneId()) {
 
@@ -170,6 +188,11 @@ struct Smem_epilogue {
     inline __device__ void store(const AccumulatorTile &acc) {
         AccumulatorFragmentIterator accum_fragment_iterator(acc);
 
+        // if ((threadIdx.x % 32 == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+        //     printf("tidx = %d, smem_o_cl, kIterationsStore = %d\n", threadIdx.x, kIterationsStore);
+        //     printf("tidx = %d, Fragment::kElements = %d\n", threadIdx.x, AccumulatorFragmentIterator::Fragment::kElements);
+        //     printf("tidx = %d, kSmemPointerOffsetPerWarp = %d\n", threadIdx.x, kSmemPointerOffsetPerWarp);
+        // }
         CUTLASS_PRAGMA_UNROLL
         for (int p = 0; p < kIterationsStore; ++p) {
             typename AccumulatorFragmentIterator::Fragment accum_fragment;
@@ -197,7 +220,7 @@ struct Smem_epilogue {
             OutputFragment aligned_accum_fragment[kPartitionsK];
             shared_load_iterator.load(aligned_accum_fragment[0]);
             // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
-            //     printf("Smem o loading, iter %d\n", 0);
+            //     printf("Smem o loading, iter %d, OutputFragment::kElements = %d\n", 0, (int)OutputFragment::kElements);
             //     auto tmp = aligned_accum_fragment[0];
             //     printf("%f %f %f %f\n", tmp[0], tmp[1], tmp[2], tmp[3]);
             // }
@@ -210,8 +233,8 @@ struct Smem_epilogue {
                     aligned_accum_fragment[0] = add_fragments(aligned_accum_fragment[0], aligned_accum_fragment[i]);
                     // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
                     //     printf("Smem o loading, iter %d\n", i);
-                    //     auto tmp = aligned_accum_fragment[0];
-                    //     printf("%f %f %f %f\n", tmp[0], tmp[1], tmp[2], tmp[3]);
+                    //     auto tmp1 = aligned_accum_fragment[0];
+                    //     printf("%f %f %f %f\n", tmp1[0], tmp1[1], tmp1[2], tmp1[3]);
                     // }
                 }
                 shared_load_iterator.add_pointer_offset((1 - kPartitionsK) * kSmemPointerOffsetPerWarp * kIterationsStore);

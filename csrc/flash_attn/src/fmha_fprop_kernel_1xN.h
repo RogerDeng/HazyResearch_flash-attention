@@ -65,7 +65,7 @@ struct Gemm_Q_K_base {
     using Smem_tile_k = typename Kernel_traits::Smem_tile_k;
     using Fragment_q = typename Smem_tile_q::Fragment;
     using Fragment_k = typename Smem_tile_k::Fragment;
-    using Smem_O_cl = fmha::Smem_epilogue<typename Kernel_traits::Cta_tile_o>;
+    using Smem_O_cl = fmha::FMHAEpilogue<typename Kernel_traits::Cta_tile_o>;
 
     // The description of the CTA tile for the 1st batched GEMM.
     using Cta_tile_p = typename Kernel_traits::Cta_tile_p;
@@ -492,7 +492,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     SmemIteratorV smem_v_cl({reinterpret_cast<Element *>(smem_v_), layout_V}, tidx);
     WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_), layout_V}, cutlass::arch::LaneId());
 
-    using Smem_O_cl = fmha::Smem_epilogue<Cta_tile_o>;
+    using Smem_O_cl = fmha::FMHAEpilogue<Cta_tile_o>;
     Smem_O_cl smem_o_cl(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
     // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
     //     printf("smem_o address = 0x%p\n", smem_ + Gemm1::SMEM_OFFSET_O);
@@ -551,28 +551,30 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                             {extent_k, params.d},
                             tidx);
 
-    using GmemThreadMapO = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
-        ThreadblockShapePV,
-        WarpShapePV,
-        /*kPartitionsK=*/Cta_tile_o::WARPS_K,
-        Element,
-        /*ElementsPerAccess=*/4
-    >::Type;
-    using GmemIteratorO = cutlass::epilogue::threadblock::PredicatedTileIterator<
-      GmemThreadMapO,
-      Element
-    >;
-    using GmemThreadMapOaccum = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
-        ThreadblockShapePV,
-        WarpShapePV,
-        /*kPartitionsK=*/Cta_tile_o::WARPS_K,
-        ElementAccum,
-        /*ElementsPerAccess=*/4
-    >::Type;
-    using GmemIteratorOaccum = cutlass::epilogue::threadblock::PredicatedTileIterator<
-      GmemThreadMapOaccum,
-      ElementAccum
-    >;
+    // using GmemThreadMapO = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
+    //     ThreadblockShapePV,
+    //     WarpShapePV,
+    //     /*kPartitionsK=*/Cta_tile_o::WARPS_K,
+    //     Element,
+    //     /*ElementsPerAccess=*/4
+    // >::Type;
+    // using GmemIteratorO = cutlass::epilogue::threadblock::PredicatedTileIterator<
+    //   GmemThreadMapO,
+    //   Element
+    // >;
+    // using GmemThreadMapOAccum = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
+    //     ThreadblockShapePV,
+    //     WarpShapePV,
+    //     /*kPartitionsK=*/Cta_tile_o::WARPS_K,
+    //     ElementAccum,
+    //     /*ElementsPerAccess=*/4
+    // >::Type;
+    // using GmemIteratorOAccum = cutlass::epilogue::threadblock::PredicatedTileIterator<
+    //   GmemThreadMapOAccum,
+    //   ElementAccum
+    // >;
+    using GmemIteratorO = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIterator;
+    using GmemIteratorOAccum = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIteratorAccum;
 
     LayoutO gmem_layout_O(params.o_row_stride_in_elts);
     typename GmemIteratorO::Params gmem_O_params(gmem_layout_O);
@@ -583,8 +585,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                             {binfo.actual_seqlen_q, params.d},
                             tidx);
 
-    typename GmemIteratorOaccum::Params gmem_Oaccum_params(gmem_layout_O);
-    GmemIteratorOaccum gmem_o_accum_cl(gmem_Oaccum_params,
+    typename GmemIteratorOAccum::Params gmem_Oaccum_params(gmem_layout_O);
+    GmemIteratorOAccum gmem_o_accum_cl(gmem_Oaccum_params,
                                        reinterpret_cast<ElementAccum *>(params.o_tmp_ptr) + row_offset_o,
                                        {binfo.actual_seqlen_q, params.d},
                                        tidx);
@@ -847,18 +849,25 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // }
 
         uint4 out[Gmem_tile_o::STGS_PER_LOOP];
+        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
+        //     printf("out STGS_PER_LOOP = %d\n", Gmem_tile_o::STGS_PER_LOOP);
+        // }
+        typename Smem_O_cl::OutputFragment out_cl[Smem_O_cl::kIterationsStore];
+        static_assert(GmemIteratorOAccum::kIterations == Smem_O_cl::kIterationsStore);
+        static_assert(GmemIteratorO::kIterations == Smem_O_cl::kIterationsStore);
         // if (!Is_first) { gmem_o_tmp.load(out, 0); }
         if (!Is_first) {
             #pragma unroll
-            for (int iter = 0; iter < GmemIteratorOaccum::kIterations; ++iter) {
-                // out_cl = reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOaccum::Fragment::kElements>(&)>(out[iter]);
+            for (int iter = 0; iter < GmemIteratorOAccum::kIterations; ++iter) {
+                // out_cl = reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOAccum::Fragment::kElements>(&)>(out[iter]);
                 // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
                 //     printf("out before: %d, %d, %d, %d\n", out[iter].x, out[iter].y, out[iter].z, out[iter].w);
                 // }
-                gmem_o_accum_cl.load(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOaccum::Fragment::kElements>(&)>(out[iter]));
+                // gmem_o_accum_cl.load(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOAccum::Fragment::kElements>(&)>(out[iter]));
+                gmem_o_accum_cl.load(out_cl[iter]);
                 gmem_o_accum_cl.move();
                 // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-                //     printf("byte offset = %d\n", iter * params.o_row_stride_in_elts * GmemIteratorOaccum::ThreadMap::Shape::kRow * sizeof(ElementAccum));
+                //     printf("byte offset = %d\n", iter * params.o_row_stride_in_elts * GmemIteratorOAccum::ThreadMap::Shape::kRow * sizeof(ElementAccum));
                 //     printf("out after: %d, %d, %d, %d\n", out[iter].x, out[iter].y, out[iter].z, out[iter].w);
                 // }
             }
@@ -1052,16 +1061,17 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         for( int ki = 0; ki < kIterationsPV; ++ki ) {
             mma_pv(acc_o_cl, reinterpret_cast<const typename WarpMmaPV::FragmentA(&)>(frag_p_reshaped[ki]), frag_v_cl[ki], acc_o_cl);
         }
-        #pragma unroll
-        for( int mi = 0; mi < Mma_tile_o::MMAS_M; ++mi ) {
-            #pragma unroll
-            for( int ni = 0; ni < Mma_tile_o::MMAS_N; ++ni ) {
-                #pragma unroll
-                for (int i = 0; i < 8; ++i) {
-                    acc_o[mi][ni].elt(i) = acc_o_cl[mi * Mma_tile_o::MMAS_M * 8 + ni * 8 + i];
-                }
-            }
-        }
+        smem_o_cl.store(acc_o_cl);
+        // #pragma unroll
+        // for( int mi = 0; mi < Mma_tile_o::MMAS_M; ++mi ) {
+        //     #pragma unroll
+        //     for( int ni = 0; ni < Mma_tile_o::MMAS_N; ++ni ) {
+        //         #pragma unroll
+        //         for (int i = 0; i < 8; ++i) {
+        //             acc_o[mi][ni].elt(i) = acc_o_cl[mi * Mma_tile_o::MMAS_M * 8 + ni * 8 + i];
+        //         }
+        //     }
+        // }
 
         // if ((threadIdx.x % 32 == 16) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
         //     printf("Per warp, threadIdx.x = %d, acc_o=%.6f\n", threadIdx.x, acc_o[0][2].elt(0));
@@ -1071,9 +1081,27 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // O-reduction. So we recalculate the max.
         float p_max_o[Gmem_tile_o::STGS_PER_LOOP][Mma_tile_o::MMAS_M];
         int rows[Gmem_tile_o::STGS_PER_LOOP];
-        for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
-            rows[jj] = tidx / Gmem_tile_o::THREADS_PER_ROW + jj * Gmem_tile_o::ROWS_PER_STG;
+        // for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+        //     rows[jj] = tidx / Gmem_tile_o::THREADS_PER_ROW + jj * Gmem_tile_o::ROWS_PER_STG;
+        // }
+        using OutputTileThreadMap = typename Smem_O_cl::OutputTileThreadMap;
+        constexpr int kRowsPerThread = OutputTileThreadMap::Iterations::kRow * Smem_O_cl::kIterationsStore;
+        static_assert(Gmem_tile_o::STGS_PER_LOOP == kRowsPerThread);
+        cutlass::MatrixCoord output_thread_offset = OutputTileThreadMap::initial_offset(tidx);
+        const int output_thread_start_row = output_thread_offset.row();
+        const int output_thread_start_column = output_thread_offset.column();
+        for (int iter = 0; iter < Smem_O_cl::kIterationsStore; ++iter) {
+            for (int row = 0; row < OutputTileThreadMap::Iterations::kRow; ++row) {
+                rows[iter * OutputTileThreadMap::Iterations::kRow + row] = output_thread_start_row + iter * OutputTileThreadMap::Shape::kRow + row;
+            }
         }
+        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
+        //     printf("rows calculation: ");
+        //     for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+        //         printf("%d ", rows[jj]);
+        //     }
+        //     printf("\n");
+        // }
         // When d = 16, O only has 16 x 16 = 256 elements, and each of the 128 threads wants
         // to write 4 elements, so only half of the thread should deal with O.
         bool o_rows_are_valid =
@@ -1101,110 +1129,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Swizzle the elements and do the final reduction.
         // smem_o.store(acc_o, 0);
 
-        // using Shape = cutlass::gemm::GemmShape<16, Mma_tile_o::MMAS_N * 16, 16>;
-        // using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
-        // using Element = cutlass::half_t;
-        // using ElementAccum = float;
-        // using LayoutA = cutlass::layout::RowMajor;
-        // using LayoutB = cutlass::layout::ColumnMajor;
-        // using LayoutC = cutlass::layout::RowMajor;
-        // using WarpMma = typename cutlass::gemm::warp::DefaultMmaTensorOp<
-        //     Shape, InstructionShape, Element, LayoutA, Element, LayoutB, ElementAccum,
-        //     LayoutC, cutlass::arch::OpMultiplyAdd, 1, true>::Type;
-
-        // constexpr int kPartitionsK = Mma_tile_o::MMAS_N;
-        // using OutputTileThreadMap = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
-        //   Shape,
-        //   typename WarpMma::Shape,
-        //   kPartitionsK,
-        //   float,
-        //   4
-        // >::Type;
-
-        // using DefaultIterators = cutlass::epilogue::threadblock::detail::DefaultIteratorsTensorOp<
-        //   float,
-        //   float,
-        //   4,
-        //   Shape,
-        //   typename WarpMma::Shape,
-        //   typename WarpMma::Policy::Operator::Shape,
-        //   typename OutputTileThreadMap::CompactedThreadMap
-        // >;
-        // using SharedLoadIterator = typename DefaultIterators::SharedLoadIterator;
-
-        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
-        //     printf("kElementsPerAccess: %d\n",  SharedLoadIterator::kElementsPerAccess);
-        //     printf("kThreads: %d\n",  SharedLoadIterator::kThreads);
-        //     printf("kLoadsPerAccess: %d\n",  SharedLoadIterator::kLoadsPerAccess);
-        //     printf("kColumn: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kColumn);
-        //     printf("kRow: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kRow);
-        //     printf("kGroup: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kGroup);
-        //     printf("kCluster: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kCluster);
-        //     printf("kTile: %d\n",  SharedLoadIterator::ThreadMap::Iterations::kTile);
-        //     printf("Fragment kElements: %d\n",  SharedLoadIterator::Fragment::kElements);
-        //     printf("AccessType kElements: %d\n",  SharedLoadIterator::AccessType::kElements);
-        // }
-
-
-        // using AccumulatorFragmentIterator = cutlass::epilogue::warp::FragmentIteratorTensorOp<
-        //                                 typename WarpMma::Shape,
-        //                                 typename WarpMma::Policy::Operator::Shape,
-        //                                 typename WarpMma::Policy::Operator::ElementAccum,
-        //                                 typename WarpMma::Policy::Operator::FragmentC,
-        //                                 LayoutC>;
-        // using WarpTileIterator = cutlass::epilogue::warp::TileIteratorTensorOp<
-        //     typename WarpMma::Shape,
-        //     typename WarpMma::Policy::Operator::Shape,
-        //     typename WarpMma::Policy::Operator::ElementAccum,
-        //     LayoutC>;
-
-        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
-        //     printf("kAccessesPerInstruction: %d\n",  AccumulatorFragmentIterator::Policy::kIterationsPerInstruction);
-        //     printf("kAccumulatorRowStride: %d\n", AccumulatorFragmentIterator::Policy::kAccumulatorRowStride);
-        //     printf("kAccumulatorColumnStride: %d\n", AccumulatorFragmentIterator::Policy::kAccumulatorColumnStride);
-        //     printf("kColumn: %d\n",  AccumulatorFragmentIterator::Policy::OperatorCount::kColumn);
-        //     printf("kRow: %d\n",  AccumulatorFragmentIterator::Policy::OperatorCount::kRow);
-        //     printf("kIterations: %d\n",  AccumulatorFragmentIterator::Policy::kIterations);
-        //     printf("Fragment kElements: %d\n",  AccumulatorFragmentIterator::Fragment::kElements);
-        //     printf("AccumulatorTile kElements: %d\n",  AccumulatorFragmentIterator::AccumulatorTile::kElements);
-        //     printf("acc_o kElements: %d\n",  Mma_tile_o::MMAS_M * Mma_tile_o::MMAS_N * 8);
-        // }
-
-        // using Padding = cutlass::MatrixShape<0, 0>;
-        // // constexpr int FragmentsPerIteration = 2;  // TODO: could be 1 for Volta?
-        // constexpr int FragmentsPerIteration = 1;  // TODO: could be 1 for Volta?
-        // using EpilogueBase = typename cutlass::epilogue::threadblock::EpilogueBase<
-        //     Shape,
-        //     typename WarpMma::Shape,
-        //     kPartitionsK,
-        //     AccumulatorFragmentIterator,
-        //     WarpTileIterator,
-        //     Padding,
-        //     FragmentsPerIteration
-        // >;
-
-        // using SharedStorage = typename EpilogueBase::SharedStorage;
-        // const int lane_idx = tidx % 32;
-        // const int warp_idx = tidx / 32;
-        // // EpilogueBase epilogue(*reinterpret_cast<SharedStorage *>(&smem_[Gemm1::SMEM_OFFSET_O]),
-        // //                       tidx, warp_idx, lane_idx);
-        // constexpr int kSmemTiles = EpilogueBase::kFragmentsPerIteration;
-        // constexpr int kSmemPointerOffset = SharedStorage::StorageShape::kCount / kSmemTiles;
-
-        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
-        //     printf("EpilogueBase\n");
-        //     printf("StorageShape kRow: %d\n",  EpilogueBase::SharedStorage::StorageShape::kRow);
-        //     printf("StorageShape kColumn: %d\n",  EpilogueBase::SharedStorage::StorageShape::kColumn);
-        //     printf("StorageShape kCount: %d\n",  EpilogueBase::SharedStorage::StorageShape::kCount);
-        //     printf("Smem_tile_o size in bytes: %d\n", Smem_tile_o::BYTES_PER_TILE);
-        //     printf("kSmemTiles: %d\n", kSmemTiles);
-        //     printf("kSmemPointerOffset: %d\n", kSmemPointerOffset);
-        //     printf("out num uint4: %d\n", Gmem_tile_o::STGS_PER_LOOP);
-        //     printf("WARPS_K: %d\n", Cta_tile_o::WARPS_K);
-        // }
-
         // __syncthreads();
-        smem_o_cl.store(reinterpret_cast<typename Smem_O_cl::AccumulatorTile(&)>(acc_o));
+        // smem_o_cl.store(acc_o_cl);
 
         // __syncthreads();
         // Smem_O_cl::store_static(
@@ -1252,7 +1178,12 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             //         printf("p_sum_log=%.6f\n", p_sum_log[jj][0]);
             //     }
             // }
+            // TODO
             if ((tidx % Gmem_tile_o::THREADS_PER_ROW == 0) && o_rows_are_valid) {
+            // if ((output_thread_start_column == 0) && o_rows_are_valid) {
+                // if ((blockIdx.x == 0) && (blockIdx.y == 0)) {
+                //     printf("thread %d storing lse, jj = %d, rows[jj] = %d, p_sum_log[jj] = %f\n", tidx, jj, rows[jj], p_sum_log[jj][0]);
+                // }
                 gmem_softmax_lse.store_row(
                     reinterpret_cast<uint32_t(&)[Mma_tile_p::MMAS_M]>(p_sum_log[jj]), rows[jj]);
             }
@@ -1260,29 +1191,46 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         gmem_softmax_lse.move();
 
         // Load from shared memory.
+        using ArrayTypeO = cutlass::Array<ElementAccum, OutputTileThreadMap::kElementsPerAccess>;
+        static_assert(OutputTileThreadMap::kElementsPerAccess * kRowsPerThread == Smem_O_cl::kIterationsStore * Smem_O_cl::OutputFragment::kElements);
+        cutlass::multiplies<ArrayTypeO> multiply_fragments;
         if (!Is_first) {
+            auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kRowsPerThread]>(out_cl);
             for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
-                out[jj] = fmha::fmul4(out[jj], p_prev_scale_o[jj]);
+                out_cl_reshaped[jj] = multiply_fragments(out_cl_reshaped[jj], p_prev_scale_o[jj]);
             }
+            // for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+            //     out[jj] = fmha::fmul4(out[jj], p_prev_scale_o[jj]);
+            // }
         }
         // smem_o.template load</*zero_init=*/Is_first>(out);
-        // Smem_epilogue::template load</*zero_init=*/Is_first>(
-        //     reinterpret_cast<typename Smem_epilogue::OutputFragment (&)[Smem_epilogue::kFragmentsPerIteration]>(out),
+        // FMHAEpilogue::template load</*zero_init=*/Is_first>(
+        //     reinterpret_cast<typename FMHAEpilogue::OutputFragment (&)[FMHAEpilogue::kFragmentsPerIteration]>(out),
         //     &smem_[Gemm1::SMEM_OFFSET_O], tidx, l);
-        smem_o_cl.template load</*zero_init=*/Is_first>(reinterpret_cast<typename Smem_O_cl::OutputFragment (&)[Smem_O_cl::kFragmentsPerIteration]>(out), tidx, l);
+        // smem_o_cl.template load</*zero_init=*/Is_first>(reinterpret_cast<typename Smem_O_cl::OutputFragment (&)[Smem_O_cl::kFragmentsPerIteration]>(out), tidx, l);
+        smem_o_cl.template load</*zero_init=*/Is_first>(out_cl, tidx, l);
 
         const bool is_final_write =
             Is_last
             || ((loop_step_idx + 1) * Cta_tile_p::N >= binfo.actual_seqlen_k)
             || ((Is_causal) && ((begin + l) * Cta_tile_p::M < (loop_step_idx + 1) * Cta_tile_p::N));
         #pragma unroll
+        // for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+        //     float sum = p_sum_o[jj][0];
+        //     float inv_sum = (sum == 0.f || sum != sum) ? 1.f : 1.f / sum;
+        //     if (Is_dropout && is_final_write) {
+        //         inv_sum *= params.rp_dropout;
+        //     }
+        //     out[jj] = fmha::fmul4(out[jj], inv_sum);
+        // }
+        auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kRowsPerThread]>(out_cl);
         for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
             float sum = p_sum_o[jj][0];
             float inv_sum = (sum == 0.f || sum != sum) ? 1.f : 1.f / sum;
             if (Is_dropout && is_final_write) {
                 inv_sum *= params.rp_dropout;
             }
-            out[jj] = fmha::fmul4(out[jj], inv_sum);
+            out_cl_reshaped[jj] = multiply_fragments(out_cl_reshaped[jj], inv_sum);
         }
 
         // if (Is_dropout && Is_last) {
@@ -1295,22 +1243,26 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         if (is_final_write) {
             // gmem_o.template store<elem_type>(out, 0);
             gmem_o.move();
-            typename GmemIteratorO::Fragment out_cl;
-            cutlass::NumericArrayConverter<Element, ElementAccum, decltype(out_cl)::kElements, cutlass::FloatRoundStyle::round_to_nearest> convert_o;
+            typename GmemIteratorO::Fragment out_cl_converted;
+            cutlass::NumericArrayConverter<Element, ElementAccum, decltype(out_cl_converted)::kElements, cutlass::FloatRoundStyle::round_to_nearest> convert_o;
             #pragma unroll
             for (int iter = 0; iter < GmemIteratorO::kIterations; ++iter) {
-                out_cl = convert_o(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorO::Fragment::kElements>(&)>(out[iter]));
-                gmem_o_cl.store(out_cl);
+                // out_cl = convert_o(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorO::Fragment::kElements>(&)>(out[iter]));
+                out_cl_converted = convert_o(out_cl[iter]);
+                gmem_o_cl.store(out_cl_converted);
                 gmem_o_cl.move();
+                // ++gmem_o_cl;
             }
         } else {
             // gmem_o_tmp.store(out, 0);
-            typename GmemIteratorOaccum::Fragment out_cl;
+            // typename GmemIteratorOAccum::Fragment out_cl;
             #pragma unroll
-            if (!Is_first) { gmem_o_accum_cl.move(-GmemIteratorOaccum::kIterations); }
-            for (int iter = 0; iter < GmemIteratorOaccum::kIterations; ++iter) {
-                // out_cl = reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOaccum::Fragment::kElements>(&)>(out[iter]);
-                gmem_o_accum_cl.store(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOaccum::Fragment::kElements>(&)>(out[iter]));
+            if (!Is_first) { gmem_o_accum_cl.move(-GmemIteratorOAccum::kIterations); }
+            for (int iter = 0; iter < GmemIteratorOAccum::kIterations; ++iter) {
+                // out_cl = reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOAccum::Fragment::kElements>(&)>(out[iter]);
+                // gmem_o_accum_cl.store(reinterpret_cast<cutlass::Array<ElementAccum, GmemIteratorOAccum::Fragment::kElements>(&)>(out[iter]));
+                // gmem_o_accum_cl.store(out_cl);
+                gmem_o_accum_cl.store(out_cl[iter]);
                 gmem_o_accum_cl.move();
             }
         }
