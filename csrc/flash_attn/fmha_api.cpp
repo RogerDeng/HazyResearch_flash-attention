@@ -96,11 +96,7 @@ void set_params_fprop(FMHA_fprop_params &params,
     params.d = d;
 
     // Set the different scale values.
-    // const float scale_bmm1 = 1.f / sqrtf(d);
-    const float scale_bmm1 = softmax_scale;
-
-    params.scale_bmm1f = scale_bmm1;
-    set_alpha(params.scale_bmm1, scale_bmm1, data_type);
+    params.scale_bmm1 = softmax_scale;
 
     // Set this to probability of keeping an element to simplify things.
     params.p_dropout = 1.f - p_dropout;
@@ -109,9 +105,8 @@ void set_params_fprop(FMHA_fprop_params &params,
     params.p_dropout_in_uint = uint32_t(std::floor(params.p_dropout * 4294967295.0));
     params.p_dropout_in_uint16_t = uint16_t(std::floor(params.p_dropout * 65535.0));
     params.rp_dropout = 1.f / params.p_dropout;
-    params.scale_bmm1_rp_dropout = params.rp_dropout * params.scale_bmm1f;
+    params.scale_bmm1_rp_dropout = params.rp_dropout * params.scale_bmm1;
     TORCH_CHECK(p_dropout < 1.f);
-    set_alpha(params.scale_dropout, params.rp_dropout, data_type);
 
     params.is_causal = is_causal;
 }

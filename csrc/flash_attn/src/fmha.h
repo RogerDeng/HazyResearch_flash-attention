@@ -99,8 +99,7 @@ struct FMHA_fprop_params : public Qkv_params {
     int b, seqlen_q, seqlen_k, d;
 
     // The scaling factors for the kernel.
-    float scale_bmm1f;
-    uint32_t scale_bmm1;
+    float scale_bmm1;
 
     // array of length b+1 holding starting offset of each sequence.
     int * __restrict__ cu_seqlens_q;
@@ -116,9 +115,6 @@ struct FMHA_fprop_params : public Qkv_params {
     // Scale factor of 1 / (1 - p_dropout).
     float rp_dropout;
     float scale_bmm1_rp_dropout;
-
-    // Scale factor of 1 / (1 - p_dropout), in half2.
-    uint32_t scale_dropout;
 
     // Random state.
     at::PhiloxCudaState philox_args;

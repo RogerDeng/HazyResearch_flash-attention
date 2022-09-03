@@ -649,7 +649,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         if (!Is_first) {
             smem_softmax_lse.store_pair(p_prev_lse, l % 2);
             // for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi]; }
-            for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi] / params.scale_bmm1f; }
+            for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi] / params.scale_bmm1; }
         }
 
         // Trigger the load for the next LSE values.
@@ -673,7 +673,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         // Compute the exponential value.
         // softmax.apply_exp(p_max);
-        softmax.scale_apply_exp(p_max, params.scale_bmm1f);
+        softmax.scale_apply_exp(p_max, params.scale_bmm1);
 
         // if (!Is_first) {
         //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
@@ -824,7 +824,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         }
         static_assert(Mma_tile_o::MMAS_M == 1);
         for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
-            p_max_o[jj][0] *= params.scale_bmm1f;
+            p_max_o[jj][0] *= params.scale_bmm1;
         }
         float p_prev_scale_o[Gmem_tile_o::STGS_PER_LOOP];
         if ((!Is_first) && o_rows_are_valid) {

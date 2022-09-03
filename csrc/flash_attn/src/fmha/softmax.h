@@ -462,7 +462,6 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
     template<typename Params>
     inline __device__ Softmax(const Params &params, void *smem, int tidx)
         : Base(params, smem, tidx)
-        , params_scale_bmm1_(params.scale_bmm1) 
         , smem_sum_(static_cast<float*>(smem), tidx)
         , smem_max_(static_cast<float*>(smem) + Smem_tile_red::ELTS_PER_TILE, tidx) {
     }
@@ -624,7 +623,6 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
         reduce_after_sync_(frag, rows, max, smem_max_);
     }
 
-    const uint32_t params_scale_bmm1_;
     Smem_tile_red smem_max_;
     Smem_tile_red smem_sum_;
 };
