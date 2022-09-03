@@ -411,7 +411,14 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     constexpr int kIterationsPV = WarpMmaPV::Shape::kK / WarpMmaPV::InstructionShape::kK;
 
     // The global memory tile to load Q.
-    using Gmem_tile_q = typename Kernel_traits::Gmem_tile_q;
+    // Copy from mma_piplined_testbed.h
+    using GmemIteratorQ = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapeQK::kM, ThreadblockShapeQK::kK>,
+      Element,
+      LayoutQ,
+      0,
+      typename MmaCoreQK::IteratorThreadMapA
+    >;
 
     // The global memory tile to load K.
     using GmemIteratorK = cutlass::transform::threadblock::PredicatedTileIterator<
@@ -461,8 +468,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     if( binfo.stop_early(loop_step_idx * Cta_tile_p::N) ) return;
 
     Gemm1 gemm_q_k(smem_, tidx);
-    // Allocate the global memory tile loader for Q.
-    Gmem_tile_q gmem_q(params.q_ptr, params.q_row_stride_in_elts, params.q_head_stride_in_elts, binfo, tidx, true);
     // Allocate the global memory tile loader for O.
     Gmem_tile_o gmem_o(params.o_ptr, params.o_row_stride_in_elts, params.o_head_stride_in_elts, binfo, tidx);
     Gmem_tile_o_tmp gmem_o_tmp(params.o_tmp_ptr, params.o_row_stride_in_elts, params.o_head_stride_in_elts, binfo, tidx);
@@ -476,7 +481,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     begin = Is_causal ? std::max(begin, loop_step_idx * Cta_tile_p::N / Cta_tile_p::M) : begin;
     const int steps_og = steps;
     steps -= begin - begin_og;
-    gmem_q.move(begin);
     gmem_o.move(begin);
     gmem_o_tmp.move(begin);
     if (Return_softmax) { gmem_s.move(begin); }
@@ -510,6 +514,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     //     printf("smem_o address = 0x%p\n", smem_ + Gemm1::SMEM_OFFSET_O);
     // }
 
+    // Allocate the global memory tile loader for Q.
     LayoutQ gmem_layout_Q(params.q_row_stride_in_elts);
     typename GmemIteratorQ::Params gmem_Q_params(gmem_layout_Q);
     const uint32_t row_offset_q = (binfo.sum_s_q + begin * ThreadblockShapeQK::kM) * params.q_row_stride_in_elts + binfo.bidh * params.q_head_stride_in_elts;
@@ -518,7 +523,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     const int extent_q = ((actual_seqlen_q <= ThreadblockShapeQK::kM) || (seqlen_q_remainder == 0)) ? actual_seqlen_q : actual_seqlen_q + ThreadblockShapeQK::kM - seqlen_q_remainder;
     GmemIteratorQ gmem_q_cl(gmem_Q_params,
                             reinterpret_cast<Element *>(params.q_ptr) + row_offset_q,
-                            // {extent_q, ThreadblockShapeQK::kK},
                             {extent_q, params.d},
                             tidx);
 
@@ -570,9 +574,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     gmem_k_cl.load(gmem_frag_k);
 
     // Trigger the loads for Q.
-    // gmem_q.load();
-
-    static_assert(GmemIteratorQ::Fragment::kElements == decltype(gmem_q)::LDGS * 8);
     typename GmemIteratorQ::Fragment gmem_frag_q;
     gmem_frag_q.clear();
     gmem_q_cl.load(gmem_frag_q);
@@ -717,8 +718,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Trigger the load for the next Q values.
         if( l < steps - 1) {
             gemm_q_k.smem_q.move_to_next_write_buffer();
-            // gmem_q.move();
-            // gmem_q.load();
             ++gmem_q_cl;
             // if ((l + 1 == steps - 1) && (binfo.actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
             if ((l + 1 == steps - 1) && (actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
@@ -728,25 +727,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                 // if (row_idx >= binfo.actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
                 if (row_idx >= actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
                     gmem_q_cl.clear_mask();
-                    // typename GmemIteratorQ::Mask mask;
-                    // gmem_q_cl.get_mask(mask);
-                    // printf("cleared mask, tidx = %d, row_idx = %d, mask = %x\n", tidx, row_idx, mask[0]);
                 }
-            //     const uint32_t row_offset_q_last = (binfo.sum_s_q + (l + 1) * ThreadblockShapeQK::kM) * params.q_row_stride_in_elts + binfo.bidh * params.q_head_stride_in_elts;
-            //     GmemIteratorQ gmem_q_last(gmem_Q_params,
-            //                               reinterpret_cast<Element *>(params.q_ptr) + row_offset_q_last,
-            //                               {binfo.actual_seqlen_q - l * ThreadblockShapeQK::kM, params.d},
-            //                               tidx);
-            //     gmem_q_last.load(gmem_frag_q);
-            //     if ((blockIdx.x == 0) && (blockIdx.y == 0)) {
-            //         typename GmemIteratorQ::Mask mask;
-            //         typename GmemIteratorQ::Mask mask_last;
-            //         gmem_q_cl.get_mask(mask);
-            //         gmem_q_last.get_mask(mask_last);
-            //         printf("tidx = %d, row_idx = %d, mask = %x, mask_last = %x\n", tidx, row_idx, mask[0], mask_last[0]);
-            //     }
-            // } else {
-            //     gmem_q_cl.load(gmem_frag_q);
             }
             gmem_q_cl.load(gmem_frag_q);
         }
@@ -855,13 +836,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         }
 
         // Commit the values for Q into shared memory.
-        if(l < steps - 1) {
-            // gmem_q.commit(gemm_q_k.smem_q);
-            // smem_q_cl.store(reinterpret_cast<typename SmemIteratorQ::Fragment(&)>(gmem_q.fetch_));
-            // smem_q_cl.store_with_pointer_offset(reinterpret_cast<typename SmemIteratorQ::Fragment(&)>(gmem_q.fetch_), ((l + 1) % 2) * Gemm1::Smem_tile_q::BYTES_PER_BUFFER / sizeof(Element));
-            // smem_q_cl.store_with_pointer_offset(gmem_frag_q, ((l + 1) % 2) * Gemm1::Smem_tile_q::BYTES_PER_BUFFER / sizeof(Element));
-            smem_q_cl.store(gmem_frag_q);
-        }
+        if (l < steps - 1) { smem_q_cl.store(gmem_frag_q); }
 
         if (Is_dropout && encode_dropout_in_sign_bit) {
             // #pragma unroll
