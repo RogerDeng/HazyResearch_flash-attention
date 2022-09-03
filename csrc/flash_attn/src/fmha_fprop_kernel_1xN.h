@@ -247,6 +247,7 @@ struct Gemm_Q_K<Kernel_traits, WarpMma, false, elem_type_> : public Gemm_Q_K_bas
     using Mma_tile_p = typename Base::Mma_tile_p;
     using elem_type = elem_type_;
     Fragment_k frag_k[2][Mma_tile_p::MMAS_N];
+    using Smem_O_cl = typename Base::Smem_O_cl;
 
     static constexpr bool SHARE_SMEM_FOR_K_AND_V = Kernel_traits::SHARE_SMEM_FOR_K_AND_V;
     static constexpr bool V_IN_REGS = Kernel_traits::V_IN_REGS;
@@ -255,13 +256,15 @@ struct Gemm_Q_K<Kernel_traits, WarpMma, false, elem_type_> : public Gemm_Q_K_bas
     static constexpr int SMEM_OFFSET_V = Smem_tile_q::BYTES_PER_TILE + (SHARE_SMEM_FOR_K_AND_V ? 0 : Smem_tile_k::BYTES_PER_TILE);
     static_assert(Smem_tile_v::BYTES_PER_TILE == (int) Smem_tile_k::BYTES_PER_TILE);
     static constexpr int SMEM_OFFSET_O = SMEM_OFFSET_V + Smem_tile_v::BYTES_PER_TILE;
-    static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + Smem_tile_o::BYTES_PER_TILE + 2048;
+    // static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + Smem_tile_o::BYTES_PER_TILE;
+    static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + sizeof(typename Smem_O_cl::SharedStorage);
 
     // If V_IN_REGS and SHARE_SMEM_FOR_K_AND_V:      Q | K/V | O | SOFTMAX
     // If !V_IN_REGS (then !SHARE_SMEM_FOR_K_AND_V): Q | K   | V | O | SOFTMAX
     static constexpr int SMEM_BYTES = Smem_tile_q::BYTES_PER_TILE
                                     + (SHARE_SMEM_FOR_K_AND_V ? 1 : 2) * Smem_tile_k::BYTES_PER_TILE 
-                                    + Smem_tile_o::BYTES_PER_TILE + Base::SMEM_BYTES_SOFTMAX;
+                                    // + Smem_tile_o::BYTES_PER_TILE + Base::SMEM_BYTES_SOFTMAX;
+                                    + (int)sizeof(typename Smem_O_cl::SharedStorage) + Base::SMEM_BYTES_SOFTMAX;
 
     __device__ inline Gemm_Q_K(char * smem_, const int tidx) 
       : Base(smem_, smem_ + Smem_tile_q::BYTES_PER_TILE, tidx) {
@@ -508,9 +511,10 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     >;
     LayoutQ gmem_layout_Q(params.q_row_stride_in_elts);
     typename GmemIteratorQ::Params gmem_Q_params(gmem_layout_Q);
-    const uint32_t row_offset_q = binfo.sum_s_q * params.q_row_stride_in_elts + binfo.bidh * params.q_head_stride_in_elts;
-    const int seqlen_q_remainder = binfo.actual_seqlen_q % ThreadblockShapeQK::kM;
-    const int extent_q = ((binfo.actual_seqlen_q <= ThreadblockShapeQK::kM) || (seqlen_q_remainder == 0)) ? binfo.actual_seqlen_q : binfo.actual_seqlen_q + ThreadblockShapeQK::kM - seqlen_q_remainder;
+    const uint32_t row_offset_q = (binfo.sum_s_q + begin * ThreadblockShapeQK::kM) * params.q_row_stride_in_elts + binfo.bidh * params.q_head_stride_in_elts;
+    const int actual_seqlen_q = binfo.actual_seqlen_q - begin * ThreadblockShapeQK::kM;
+    const int seqlen_q_remainder = actual_seqlen_q % ThreadblockShapeQK::kM;
+    const int extent_q = ((actual_seqlen_q <= ThreadblockShapeQK::kM) || (seqlen_q_remainder == 0)) ? actual_seqlen_q : actual_seqlen_q + ThreadblockShapeQK::kM - seqlen_q_remainder;
     GmemIteratorQ gmem_q_cl(gmem_Q_params,
                             reinterpret_cast<Element *>(params.q_ptr) + row_offset_q,
                             // {extent_q, ThreadblockShapeQK::kK},
@@ -578,17 +582,17 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
     LayoutO gmem_layout_O(params.o_row_stride_in_elts);
     typename GmemIteratorO::Params gmem_O_params(gmem_layout_O);
-    const uint32_t row_offset_o = binfo.sum_s_q * params.o_row_stride_in_elts + binfo.bidh * params.o_head_stride_in_elts;
+    const uint32_t row_offset_o = (binfo.sum_s_q + begin * ThreadblockShapeQK::kM) * params.o_row_stride_in_elts + binfo.bidh * params.o_head_stride_in_elts;
     GmemIteratorO gmem_o_cl(gmem_O_params,
                             reinterpret_cast<Element *>(params.o_ptr) + row_offset_o,
                             // {extent_q, ThreadblockShapePV::kN},
-                            {binfo.actual_seqlen_q, params.d},
+                            {actual_seqlen_q, params.d},
                             tidx);
 
     typename GmemIteratorOAccum::Params gmem_Oaccum_params(gmem_layout_O);
     GmemIteratorOAccum gmem_o_accum_cl(gmem_Oaccum_params,
                                        reinterpret_cast<ElementAccum *>(params.o_tmp_ptr) + row_offset_o,
-                                       {binfo.actual_seqlen_q, params.d},
+                                       {actual_seqlen_q, params.d},
                                        tidx);
 
     // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
@@ -879,11 +883,13 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             // gmem_q.move();
             // gmem_q.load();
             ++gmem_q_cl;
-            if ((l + 1 == steps - 1) && (binfo.actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
+            // if ((l + 1 == steps - 1) && (binfo.actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
+            if ((l + 1 == steps - 1) && (actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
                 // TODO: this probably only works for head_dim = 64 and head_dim = 128, which is
                 // what we have right now. Maybe for head_dim = 32 or 96, this could be different.
                 const int row_idx = tidx / (GmemIteratorQ::Shape::kColumn / GmemIteratorQ::Fragment::kElements);
-                if (row_idx >= binfo.actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
+                // if (row_idx >= binfo.actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
+                if (row_idx >= actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
                     gmem_q_cl.clear_mask();
                     // typename GmemIteratorQ::Mask mask;
                     // gmem_q_cl.get_mask(mask);
@@ -1179,8 +1185,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             //     }
             // }
             // TODO
-            if ((tidx % Gmem_tile_o::THREADS_PER_ROW == 0) && o_rows_are_valid) {
-            // if ((output_thread_start_column == 0) && o_rows_are_valid) {
+            // if ((tidx % Gmem_tile_o::THREADS_PER_ROW == 0) && o_rows_are_valid) {
+            if ((output_thread_start_column == 0) && o_rows_are_valid) {
                 // if ((blockIdx.x == 0) && (blockIdx.y == 0)) {
                 //     printf("thread %d storing lse, jj = %d, rows[jj] = %d, p_sum_log[jj] = %f\n", tidx, jj, rows[jj], p_sum_log[jj][0]);
                 // }
@@ -1253,6 +1259,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                 gmem_o_cl.move();
                 // ++gmem_o_cl;
             }
+            // We also need to move gmem_o_accum_cl. For example, if Is_causal=true and seqlen=512,
+            // in the first loop, we write the first 256 rows to gmem_o_cl and the last 256 rows to gmem_o_accum_cl.
+            if (Is_first && !Is_last) { gmem_o_accum_cl.move(GmemIteratorOAccum::kIterations); }
         } else {
             // gmem_o_tmp.store(out, 0);
             // typename GmemIteratorOAccum::Fragment out_cl;
