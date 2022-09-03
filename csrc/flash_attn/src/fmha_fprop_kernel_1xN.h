@@ -63,8 +63,6 @@ struct Gemm_Q_K_base {
     using Smem_tile_o = typename Kernel_traits::Smem_tile_o;
     using Smem_tile_q = typename Kernel_traits::Smem_tile_q;
     using Smem_tile_k = typename Kernel_traits::Smem_tile_k;
-    using Fragment_q = typename Smem_tile_q::Fragment;
-    using Fragment_k = typename Smem_tile_k::Fragment;
     using Smem_O_cl = fmha::FMHAEpilogue<typename Kernel_traits::Cta_tile_o>;
 
     // The description of the CTA tile for the 1st batched GEMM.
@@ -99,7 +97,6 @@ struct Gemm_Q_K_base {
     Smem_tile_q smem_q;
     Smem_tile_k smem_k;
     typename WarpMma::FragmentA frag_q[2];
-    static_assert(WarpMma::FragmentA::kStorageElements == 4 || WarpMma::FragmentA::kStorageElements == 2);
     char *smem_q_ptr;
     char *smem_k_ptr;
 };
@@ -111,7 +108,6 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
     using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
-    using Fragment_k = typename Base::Fragment_k;
     using Mma_tile_p = typename Base::Mma_tile_p;
     using Cta_tile_p = typename Base::Cta_tile_p;
     using elem_type = elem_type_;
@@ -154,7 +150,6 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
     __device__ inline void operator()(WarpMma warp_mma, typename WarpMma::FragmentC &acc_p, int byte_offset_q=0){
         typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Base::Cta_tile_p::M, Base::Cta_tile_p::K});
         typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_q_ptr + byte_offset_q), layout_A}, cutlass::arch::LaneId());
-        static_assert(WarpMma::FragmentA::kStorageElements == 4 || WarpMma::FragmentA::kStorageElements == 2);
         ++iter_A;
         // Do this part of P^T = (Q * K^T)^T.
         #pragma unroll
@@ -182,7 +177,6 @@ struct Gemm_Q_K<Kernel_traits, WarpMma, false, elem_type_> : public Gemm_Q_K_bas
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
     using Smem_tile_v = typename Kernel_traits::Smem_tile_v;
-    using Fragment_k = typename Base::Fragment_k;
     using Cta_tile_p = typename Base::Cta_tile_p;
     using Mma_tile_p = typename Base::Mma_tile_p;
     using elem_type = elem_type_;
@@ -220,7 +214,6 @@ struct Gemm_Q_K<Kernel_traits, WarpMma, false, elem_type_> : public Gemm_Q_K_bas
     __device__ inline void operator()(WarpMma warp_mma, typename WarpMma::FragmentC &acc_p, int byte_offset_q=0){
         typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Base::Cta_tile_p::M, Base::Cta_tile_p::K});
         typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(Base::smem_q_ptr + byte_offset_q), layout_A}, cutlass::arch::LaneId());
-        static_assert(WarpMma::FragmentA::kStorageElements == 4 || WarpMma::FragmentA::kStorageElements == 2);
         ++iter_A;
         typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
         typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
