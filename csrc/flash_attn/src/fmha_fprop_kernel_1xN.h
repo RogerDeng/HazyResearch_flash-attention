@@ -377,29 +377,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // The MMA tile for the 2nd GEMM.
     using Mma_tile_o = fmha::Hmma_tile<Cta_tile_o>;
 
-    // The global memory tile to load Q.
-    using Gmem_tile_q = typename Kernel_traits::Gmem_tile_q;
-
-    // The global memory tile to load K.
-    using Gmem_tile_k = typename Kernel_traits::Gmem_tile_k;
-
-    // The global memory tile to load V.
-    using Gmem_tile_v = typename Kernel_traits::Gmem_tile_v;
-    // The shared memory tile to swizzle V.
-    using Smem_tile_v = typename Kernel_traits::Smem_tile_v;
-
-    // The global memory tile to store O.
-    using Gmem_tile_o = typename Kernel_traits::Gmem_tile_o;
-    using Gmem_tile_o_tmp = fmha::Gmem_tile_o<Cta_tile_o, 4>;
-    // The shared memory tile to swizzle O.
-    using Smem_tile_o = typename Kernel_traits::Smem_tile_o;
-
-    using Gmem_tile_s = typename Kernel_traits::Gmem_tile_s;
-
-    using Gmem_softmax_sum = typename Kernel_traits::Gmem_softmax_sum;
-
-    using Smem_softmax_sum = typename Kernel_traits::Smem_dp_sum;
-
     using InstructionShape = typename Kernel_traits::MmaInstructionShape;
     using Element = cutlass::half_t;
     using ElementAccum = float;
@@ -432,6 +409,42 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     using SmemLayoutV = typename MmaCorePV::SmemLayoutB;
     using SmemIteratorV = typename MmaCorePV::SmemIteratorB;
     constexpr int kIterationsPV = WarpMmaPV::Shape::kK / WarpMmaPV::InstructionShape::kK;
+
+    // The global memory tile to load Q.
+    using Gmem_tile_q = typename Kernel_traits::Gmem_tile_q;
+
+    // The global memory tile to load K.
+    using GmemIteratorK = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapeQK::kK, ThreadblockShapeQK::kN>,
+      Element,
+      LayoutK,
+      1,
+      typename MmaCoreQK::IteratorThreadMapB
+    >;
+
+    // The global memory tile to load V.
+    using GmemIteratorV = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapePV::kK, ThreadblockShapePV::kN>,
+      Element,
+      LayoutV,
+      0,
+      typename MmaCorePV::IteratorThreadMapB
+    >;
+
+    // The shared memory tile to swizzle V.
+    using Smem_tile_v = typename Kernel_traits::Smem_tile_v;
+
+    // The global memory tile to store O.
+    using Gmem_tile_o = typename Kernel_traits::Gmem_tile_o;
+    using Gmem_tile_o_tmp = fmha::Gmem_tile_o<Cta_tile_o, 4>;
+    // The shared memory tile to swizzle O.
+    using Smem_tile_o = typename Kernel_traits::Smem_tile_o;
+
+    using Gmem_tile_s = typename Kernel_traits::Gmem_tile_s;
+
+    using Gmem_softmax_sum = typename Kernel_traits::Gmem_softmax_sum;
+
+    using Smem_softmax_sum = typename Kernel_traits::Smem_dp_sum;
 
     using Gemm1 = Gemm_Q_K<Kernel_traits, WarpMmaQK, Kernel_traits::K_IN_REGS, elem_type>;
 
@@ -474,10 +487,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
     fmha::Mask<Cta_tile_p, Is_causal> mask(binfo, tidx, loop_step_idx);
 
-    // Allocate the global memory tile loader for K.
-    Gmem_tile_k gmem_k(params.k_ptr, params.k_row_stride_in_elts, params.k_head_stride_in_elts, binfo, tidx, false);
-    // Allocate the global memory tile loader for V.
-    Gmem_tile_v gmem_v(params.v_ptr, params.v_row_stride_in_elts, params.v_head_stride_in_elts, binfo, tidx, false);
     // The base pointer of smem_v;
     char *smem_v_ = &smem_[Gemm1::SMEM_OFFSET_V];
     
@@ -501,14 +510,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     //     printf("smem_o address = 0x%p\n", smem_ + Gemm1::SMEM_OFFSET_O);
     // }
 
-    // Copy from mma_piplined_testbed.h
-    using GmemIteratorQ = cutlass::transform::threadblock::PredicatedTileIterator<
-      cutlass::MatrixShape<ThreadblockShapeQK::kM, ThreadblockShapeQK::kK>,
-      Element,
-      LayoutQ,
-      0,
-      typename MmaCoreQK::IteratorThreadMapA
-    >;
     LayoutQ gmem_layout_Q(params.q_row_stride_in_elts);
     typename GmemIteratorQ::Params gmem_Q_params(gmem_layout_Q);
     const uint32_t row_offset_q = (binfo.sum_s_q + begin * ThreadblockShapeQK::kM) * params.q_row_stride_in_elts + binfo.bidh * params.q_head_stride_in_elts;
@@ -521,13 +522,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                             {extent_q, params.d},
                             tidx);
 
-    using GmemIteratorK = cutlass::transform::threadblock::PredicatedTileIterator<
-      cutlass::MatrixShape<ThreadblockShapeQK::kK, ThreadblockShapeQK::kN>,
-      Element,
-      LayoutK,
-      1,
-      typename MmaCoreQK::IteratorThreadMapB
-    >;
+    // Allocate the global memory tile loader for K.
     LayoutK gmem_layout_K(params.k_row_stride_in_elts);
     typename GmemIteratorK::Params gmem_K_params(gmem_layout_K);
     const uint32_t row_offset_k = (binfo.sum_s_k + loop_step_idx * ThreadblockShapeQK::kN) * params.k_row_stride_in_elts + binfo.bidh * params.k_head_stride_in_elts;
@@ -538,45 +533,16 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                             {params.d, extent_k},
                             tidx);
 
-    using GmemIteratorV = cutlass::transform::threadblock::PredicatedTileIterator<
-      cutlass::MatrixShape<ThreadblockShapePV::kK, ThreadblockShapePV::kN>,
-      Element,
-      LayoutV,
-      0,
-      typename MmaCorePV::IteratorThreadMapB
-    >;
+    // Allocate the global memory tile loader for V.
     LayoutV gmem_layout_V(params.v_row_stride_in_elts);
     typename GmemIteratorV::Params gmem_V_params(gmem_layout_V);
     const uint32_t row_offset_v = (binfo.sum_s_k + loop_step_idx * ThreadblockShapePV::kK) * params.v_row_stride_in_elts + binfo.bidh * params.v_head_stride_in_elts;
     // extent_v is the same as extent_k
     GmemIteratorV gmem_v_cl(gmem_V_params,
                             reinterpret_cast<Element *>(params.v_ptr) + row_offset_v,
-                            // {extent_k, ThreadblockShapePV::kN},
                             {extent_k, params.d},
                             tidx);
 
-    // using GmemThreadMapO = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
-    //     ThreadblockShapePV,
-    //     WarpShapePV,
-    //     /*kPartitionsK=*/Cta_tile_o::WARPS_K,
-    //     Element,
-    //     /*ElementsPerAccess=*/4
-    // >::Type;
-    // using GmemIteratorO = cutlass::epilogue::threadblock::PredicatedTileIterator<
-    //   GmemThreadMapO,
-    //   Element
-    // >;
-    // using GmemThreadMapOAccum = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
-    //     ThreadblockShapePV,
-    //     WarpShapePV,
-    //     /*kPartitionsK=*/Cta_tile_o::WARPS_K,
-    //     ElementAccum,
-    //     /*ElementsPerAccess=*/4
-    // >::Type;
-    // using GmemIteratorOAccum = cutlass::epilogue::threadblock::PredicatedTileIterator<
-    //   GmemThreadMapOAccum,
-    //   ElementAccum
-    // >;
     using GmemIteratorO = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIterator;
     using GmemIteratorOAccum = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIteratorAccum;
 
@@ -585,7 +551,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     const uint32_t row_offset_o = (binfo.sum_s_q + begin * ThreadblockShapeQK::kM) * params.o_row_stride_in_elts + binfo.bidh * params.o_head_stride_in_elts;
     GmemIteratorO gmem_o_cl(gmem_O_params,
                             reinterpret_cast<Element *>(params.o_ptr) + row_offset_o,
-                            // {extent_q, ThreadblockShapePV::kN},
                             {actual_seqlen_q, params.d},
                             tidx);
 
@@ -595,55 +560,14 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                                        {actual_seqlen_q, params.d},
                                        tidx);
 
-    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-    //     printf("ThreadmapO kThreads = %d, kWarpCount = %d\n", OutputTileThreadMap::kThreads, OutputTileThreadMap::kWarpCount);
-    //     printf("ThreadmapO kColumn = %d, kRow = %d, kGroup = %d, kCluster = %d\n", OutputTileThreadMap::Iterations::kColumn, OutputTileThreadMap::Iterations::kRow, OutputTileThreadMap::Iterations::kGroup, OutputTileThreadMap::Iterations::kCluster);
-    //     printf("ThreadmapO kTile= %d\n", OutputTileThreadMap::Count::kTile);
-    //     printf("gmem_o_cl kITerations = %d\n", GmemIteratorO::kIterations);
-    //     printf("gmem_o_cl, Fragment::kElements = %d, kThreads = %d, kIterations = %d\n",
-    //            GmemIteratorO::Fragment::kElements, GmemIteratorO::kThreads, GmemIteratorO::kIterations);
-    //     printf("gmem_o STGS_PER_LOOP = %d\n", Gmem_tile_o::STGS_PER_LOOP);
-    // }
-
-    // #if 0
-    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y >= 0)) {
-    //     printf("GmemK Params k_row_stride_in_elts = %d\n", params.k_row_stride_in_elts);
-    //     printf("GmemK row_offsets in elts = %d\n", row_offset);
-    // }
-    // #endif
-
     if (!Is_first) {
-        gmem_k.move(loop_step_idx);
-        gmem_v.move(loop_step_idx);
         if (Return_softmax) { gmem_s.move(loop_step_idx * steps_og); }
     }
 
     // Trigger the loads for K.
-    // gmem_k.load();
-    static_assert(GmemIteratorK::Fragment::kElements == decltype(gmem_k)::LDGS * 8);
     typename GmemIteratorK::Fragment gmem_frag_k;
     gmem_frag_k.clear();
     gmem_k_cl.load(gmem_frag_k);
-
-    // #if 0
-    // if ((threadIdx.x == 97) && (blockIdx.x == 1) && (blockIdx.y == 3)) {
-    //     printf("gmem_frag_k = \n");
-    //     uint32_t *ptr = gmem_frag_k.raw_data();
-    //     for (int i = 0; i < 32; ++i) {
-    //         float2 tmp = __half22float2(reinterpret_cast<__half2 *>(ptr)[i]);
-    //         printf("%f %f ", tmp.x, tmp.y);
-    //     }
-    //     printf("\n");
-    //     printf("gmem_k.fetch_ = \n");
-    //     for (int i = 0; i < 8; ++i) {
-    //         for (int j = 0; j < 4; ++ j) {
-    //             float2 tmp = __half22float2(reinterpret_cast<__half2 *>(&gmem_k.fetch_[i])[j]);
-    //             printf("%f %f ", tmp.x, tmp.y);
-    //         }
-    //     }
-    //     printf("\n");
-    // }
-    // #endif
 
     // Trigger the loads for Q.
     // gmem_q.load();
@@ -653,83 +577,10 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     gmem_frag_q.clear();
     gmem_q_cl.load(gmem_frag_q);
 
-    // #if 1
-    // // if ((threadIdx.x == 37) && (blockIdx.x == 1) && (blockIdx.y == 3)) {
-    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-    //     printf("gmem_frag_q = \n");
-    //     uint32_t *ptr = gmem_frag_q.raw_data();
-    //     for (int i = 0; i < 4; ++i) {
-    //         float2 tmp = __half22float2(reinterpret_cast<__half2 *>(ptr)[i]);
-    //         printf("%f %f ", tmp.x, tmp.y);
-    //     }
-    //     printf("\n");
-    //     printf("gmem_q.fetch_ = \n");
-    //     for (int i = 0; i < 1; ++i) {
-    //         for (int j = 0; j < 4; ++ j) {
-    //             float2 tmp = __half22float2(reinterpret_cast<__half2 *>(&gmem_q.fetch_[i])[j]);
-    //             printf("%f %f ", tmp.x, tmp.y);
-    //         }
-    //     }
-    //     printf("\n");
-    // }
-    // #endif
-
-    // gmem_q.move();
-    // gmem_q.load();
-
-    // ++gmem_q_cl;
-    // gmem_frag_q.clear();
-    // gmem_q_cl.load(gmem_frag_q);
-
-    // #if 1
-    // // if ((threadIdx.x == 37) && (blockIdx.x == 1) && (blockIdx.y == 3)) {
-    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-    //     printf("gmem_frag_q = \n");
-    //     uint32_t *ptr = gmem_frag_q.raw_data();
-    //     for (int i = 0; i < 4; ++i) {
-    //         float2 tmp = __half22float2(reinterpret_cast<__half2 *>(ptr)[i]);
-    //         printf("%f %f ", tmp.x, tmp.y);
-    //     }
-    //     printf("\n");
-    //     printf("gmem_q.fetch_ = \n");
-    //     for (int i = 0; i < 1; ++i) {
-    //         for (int j = 0; j < 4; ++ j) {
-    //             float2 tmp = __half22float2(reinterpret_cast<__half2 *>(&gmem_q.fetch_[i])[j]);
-    //             printf("%f %f ", tmp.x, tmp.y);
-    //         }
-    //     }
-    //     printf("\n");
-    // }
-    // #endif
-
     // Trigger the loads for V.
-    // gmem_v.load();
-
-    static_assert(GmemIteratorV::Fragment::kElements == decltype(gmem_v)::LDGS * 8);
     typename GmemIteratorV::Fragment gmem_frag_v;
     gmem_frag_v.clear();
     gmem_v_cl.load(gmem_frag_v);
-
-    // #if 1
-    // if ((threadIdx.x == 97) && (blockIdx.x == 1) && (blockIdx.y == 3)) {
-    // // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-    //     printf("gmem_frag_v = \n");
-    //     uint32_t *ptr = gmem_frag_v.raw_data();
-    //     for (int i = 0; i < 32; ++i) {
-    //         float2 tmp = __half22float2(reinterpret_cast<__half2 *>(ptr)[i]);
-    //         printf("%f %f ", tmp.x, tmp.y);
-    //     }
-    //     printf("\n");
-    //     printf("gmem_v.fetch_ = \n");
-    //     for (int i = 0; i < 8; ++i) {
-    //         for (int j = 0; j < 4; ++ j) {
-    //             float2 tmp = __half22float2(reinterpret_cast<__half2 *>(&gmem_v.fetch_[i])[j]);
-    //             printf("%f %f ", tmp.x, tmp.y);
-    //         }
-    //     }
-    //     printf("\n");
-    // }
-    // #endif
 
     if (!Is_first) { __syncthreads(); }
 
@@ -739,23 +590,11 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     }
 
     // Commit the data for Q and V to shared memory.
-    // gmem_q.commit(gemm_q_k.smem_q);
-    // smem_q_cl.store(reinterpret_cast<typename SmemIteratorQ::Fragment(&)>(gmem_q.fetch_));
     smem_q_cl.store(gmem_frag_q);
-    // gmem_v.commit(smem_v);
-    // smem_v_cl.store(reinterpret_cast<typename SmemIteratorV::Fragment(&)>(gmem_v.fetch_));
     smem_v_cl.store(gmem_frag_v);
-
-    // const uint32_t scale_bmm1 = reinterpret_cast<const uint32_t&>(params.scale_bmm1);
-    // #pragma unroll
-    // for(int it=0;it < Gmem_tile_k::LDGS;it++){
-    //     gmem_k.fetch_[it] = fmha::hmul8(scale_bmm1, gmem_k.fetch_[it]);
-    // }
 
     // Commit the data for K to shared memory.
     if( !Kernel_traits::SHARE_SMEM_FOR_K_AND_V ) {
-        // gmem_k.commit(gemm_q_k.smem_k);
-        // smem_k_cl.store(reinterpret_cast<typename SmemIteratorK::Fragment(&)>(gmem_k.fetch_));
         smem_k_cl.store(gmem_frag_k);
     }
 
@@ -813,9 +652,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Make sure we are done loading the fragments for K.
         __syncthreads();
 
-        // Commit the data to shared memory for V.
-        // gmem_k.commit(gemm_q_k.smem_k);
-        // smem_k_cl.store(reinterpret_cast<typename SmemIteratorK::Fragment(&)>(gmem_k.fetch_));
+        // Commit the data to shared memory for K.
         smem_k_cl.store(gmem_frag_k);
 
         // Make sure the data is in shared memory.
