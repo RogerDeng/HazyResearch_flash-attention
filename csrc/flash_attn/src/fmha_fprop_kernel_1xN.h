@@ -510,8 +510,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     __syncthreads();
 
     // Load the fragments for Q.
-    // gemm_q_k.load_q();
-    gemm_q_k.load_q(0 * Gemm1::Smem_tile_q::BYTES_PER_BUFFER);
+    gemm_q_k.load_q();
 
     // // Load the fragments for V. We keep the data in registers during the entire kernel.
     // typename Smem_tile_v::Fragment frag_v[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_N];
@@ -536,26 +535,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         ++iter_V;
     }
 
-    // for (int ki = 0; ki < Mma_tile_o::MMAS_K; ++ki) {
-    //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-    //         uint32_t * frag_v_ptr = frag_v_cl[ki].raw_data();
-    //         printf("frag_v_cl = \n");
-    //         for (int i = 0; i < 4 * Mma_tile_o::MMAS_N; ++i) {
-    //             float2 tmp = __half22float2(reinterpret_cast<__half2 &>(frag_v_ptr[i]));
-    //             printf("%f, %f, ", tmp.x, tmp.y);
-    //         }
-    //         printf("\n");
-    //         printf("frag_v = \n");
-    //         for (int i = 0; i < Mma_tile_o::MMAS_N; ++i) {
-    //             for (int j = 0; j < 4; ++j) {
-    //                 float2 tmp = __half22float2(reinterpret_cast<__half2 &>(frag_v[ki][i].reg(j)));
-    //                 printf("%f, %f, ", tmp.x, tmp.y);
-    //             }
-    //         }
-    //         printf("\n");
-    //     }
-    // }
-
     // Commit the data for K to shared memory if it has not been done already.
     if( Kernel_traits::SHARE_SMEM_FOR_K_AND_V ) {
         // Make sure we are done loading the fragments for K.
@@ -569,7 +548,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     }
 
     // Load the fragments for K. 
-    // gemm_q_k.load_k();
     gemm_q_k.load_k();
 
     // Create the object to do the softmax.
@@ -582,21 +560,12 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         if((begin + l) * Cta_tile_p::M >= binfo.actual_seqlen_q) break;
 
         // Declare the accumulators for the 1st gemm.
-        // fmha::Fragment_accumulator acc_p[Mma_tile_p::MMAS_M][Mma_tile_p::MMAS_N];
-        // fmha::Clear_accumulator<typename fmha::Accumulator_type, Cta_tile_p::WARPS_K>::apply(acc_p);
-        // using WarpMmaQK = typename Mma_tile_p::WarpMma;
         WarpMmaQK mma_qk;
         typename WarpMmaQK::FragmentC acc_p;
         acc_p.clear();
 
         // Do this part of P = Q * K^T.
-        // gemm_q_k(acc_p);
-        // gemm_q_k(mma_qk, acc_p, (l % 2) * Gemm1::Smem_tile_q::BYTES_PER_BUFFER);
         gemm_q_k(mma_qk, acc_p);
-
-        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-        //     printf("acc_p=%.6f, %.6f\n", acc_p[0][0].elt(0), acc_p[0][0].elt(1));
-        // }
 
         typename Smem_O_cl::OutputFragment out_cl[Smem_O_cl::kIterationsStore];
         static_assert(GmemIteratorOAccum::kIterations == Smem_O_cl::kIterationsStore);
@@ -715,7 +684,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             softmax.template apply_dropout_16bits<encode_dropout_in_sign_bit>(ph0, ph1, params.p_dropout_in_uint16_t);
         }
 
-        // using Frag_p = fmha::Fragment_a<fmha::Row>;
         static_assert(Mma_tile_o::MMAS_M == Mma_tile_p::MMAS_M);
         static_assert(Mma_tile_o::MMAS_K == Mma_tile_p::MMAS_N);
         softmax.pack_noconvert(acc_p);
@@ -745,20 +713,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         }
 
         // Declare the accumulators for the 2nd gemm.
-        fmha::Fragment_accumulator acc_o[Mma_tile_o::MMAS_M][Mma_tile_o::MMAS_N];
-        // fmha::Clear_accumulator<typename fmha::Accumulator_type, Cta_tile_o::WARPS_K>::apply(acc_o);
-
-        // // Do this part of O = P^T * V^T.
-        // #pragma unroll
-        // for( int ki = 0; ki < Mma_tile_o::MMAS_K; ++ki ) {
-        //     fmha::gemm_cl<elem_type>(acc_o, frag_p[ki], frag_v[ki]);
-        //     // if ((threadIdx.x == 4) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-        //     //     float2 tmp_p = __half22float2(reinterpret_cast<__half2 &>(frag_p[ki]));
-        //     //     float2 tmp_v = __half22float2(reinterpret_cast<__half2 &>(frag_v[ki]));
-        //     //     printf("Per warp, threadIdx.x = %d, frag_p = %.6f, %.6f, frag_v = %.6f, %.6f, acc_o=%.6f\n", threadIdx.x, tmp_p.x, tmp_p.y, tmp_v.x, tmp_v.y, acc_o[0][0].elt(0));
-        //     // }
-        // }
-
         WarpMmaPV mma_pv;
         typename WarpMmaPV::FragmentC acc_o_cl;
         static_assert(WarpMmaPV::FragmentC::kElements == Mma_tile_o::MMAS_M * Mma_tile_o::MMAS_N * 8);
@@ -773,21 +727,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         for( int ki = 0; ki < kIterationsPV; ++ki ) {
             mma_pv(acc_o_cl, reinterpret_cast<const typename WarpMmaPV::FragmentA(&)>(frag_p_reshaped[ki]), frag_v_cl[ki], acc_o_cl);
         }
+        // Swizzle the elements and do the final reduction.
         smem_o_cl.store(acc_o_cl);
-        // #pragma unroll
-        // for( int mi = 0; mi < Mma_tile_o::MMAS_M; ++mi ) {
-        //     #pragma unroll
-        //     for( int ni = 0; ni < Mma_tile_o::MMAS_N; ++ni ) {
-        //         #pragma unroll
-        //         for (int i = 0; i < 8; ++i) {
-        //             acc_o[mi][ni].elt(i) = acc_o_cl[mi * Mma_tile_o::MMAS_M * 8 + ni * 8 + i];
-        //         }
-        //     }
-        // }
-
-        // if ((threadIdx.x % 32 == 16) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-        //     printf("Per warp, threadIdx.x = %d, acc_o=%.6f\n", threadIdx.x, acc_o[0][2].elt(0));
-        // }
 
         // The mapping from tidx to rows changes between the softmax and the
         // O-reduction. So we recalculate the max.
@@ -807,13 +748,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                 rows[iter * OutputTileThreadMap::Iterations::kRow + row] = output_thread_start_row + iter * OutputTileThreadMap::Shape::kRow + row;
             }
         }
-        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-        //     printf("rows calculation: ");
-        //     for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
-        //         printf("%d ", rows[jj]);
-        //     }
-        //     printf("\n");
-        // }
         // When d = 16, O only has 16 x 16 = 256 elements, and each of the 128 threads wants
         // to write 4 elements, so only half of the thread should deal with O.
         bool o_rows_are_valid =
@@ -837,30 +771,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // }
 
         static_assert(Gmem_tile_o::LOOPS == 1);
-
-        // Swizzle the elements and do the final reduction.
-        // smem_o.store(acc_o, 0);
-
-        // __syncthreads();
-        // smem_o_cl.store(acc_o_cl);
-
-        // __syncthreads();
-        // Smem_O_cl::store_static(
-        //     reinterpret_cast<typename Smem_O_cl::AccumulatorTile (&)>(acc_o),
-        //     &smem_[Gemm1::SMEM_OFFSET_O], tidx);
-
-        // // __syncthreads();
-        // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0)) {
-        //     printf("Smem_o content from new Smem write\n");
-        //     for (int row = 0; row < 1; ++row) {
-        //         for (int col = 0; col < 64; ++col) {
-        //             printf("%f ", reinterpret_cast<float *>(&smem_[Gemm1::SMEM_OFFSET_O])[row * 64 + col]);
-        //         }
-        //         printf("\n");
-        //     }
-        // }
-
-        // __syncthreads();
 
         // Make sure the data is in shared memory.
         __syncthreads();

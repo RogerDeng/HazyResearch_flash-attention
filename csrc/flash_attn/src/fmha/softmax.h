@@ -438,23 +438,12 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
 
     // The base class.
     using Base = Softmax_base<Cta_tile, Kernel_traits>;
-    // The fragment.
-    using Fragment_a = fmha::Fragment_a<fmha::Row>;
-
-    static_assert(Fragment_a::NUM_REGS == 4);
 
     static constexpr int WARPS_M = Cta_tile::WARPS_M;
     static constexpr int WARPS_N = Cta_tile::WARPS_N;
     // The MMAs.
     static constexpr int MMAS_M = Base::MMAS_M;
     static constexpr int MMAS_N = Base::MMAS_N;
-
-    // The accumulators.
-    using Accumulator = fmha::Fragment_accumulator;
-    using Accumulator_out = Fragment<uint16_t, 8>;
-    static_assert(Accumulator_out::NUM_REGS == 4);
-
-    static_assert(std::is_same<Accumulator::Data_type, float>::value);
 
     using Smem_tile_red = Smem_tile_reduce<Cta_tile, Kernel_traits>;
     static_assert(Smem_tile_red::ELTS_PER_TILE == Cta_tile::M * WARPS_N);
@@ -464,35 +453,6 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
         : Base(params, smem, tidx)
         , smem_sum_(static_cast<float*>(smem), tidx)
         , smem_max_(static_cast<float*>(smem) + Smem_tile_red::ELTS_PER_TILE, tidx) {
-    }
-
-    // Pack the data to a fragment for the next GEMM.
-    template<typename elem_type=__half, int K, int M>
-    inline __device__ void pack(Fragment_a (&dst)[K][M]) const {
-        #pragma unroll
-        for( int mi = 0; mi < M; ++mi ) {
-            #pragma unroll
-            for( int ki = 0; ki < K; ++ki ) {
-
-                // 1st row - 4 elements per row.
-                float tmp_00 = this->elt_[2 * mi + 0][4 * ki + 0];
-                float tmp_01 = this->elt_[2 * mi + 0][4 * ki + 1];
-                float tmp_02 = this->elt_[2 * mi + 0][4 * ki + 2];
-                float tmp_03 = this->elt_[2 * mi + 0][4 * ki + 3];
-
-                // 2nd row - 4 elements per row.
-                float tmp_10 = this->elt_[2 * mi + 1][4 * ki + 0];
-                float tmp_11 = this->elt_[2 * mi + 1][4 * ki + 1];
-                float tmp_12 = this->elt_[2 * mi + 1][4 * ki + 2];
-                float tmp_13 = this->elt_[2 * mi + 1][4 * ki + 3];
-
-                // Pack to 4 registers.
-                dst[ki][mi].reg(0) = fmha::float2_pack<elem_type>(tmp_00, tmp_01);
-                dst[ki][mi].reg(1) = fmha::float2_pack<elem_type>(tmp_10, tmp_11);
-                dst[ki][mi].reg(2) = fmha::float2_pack<elem_type>(tmp_02, tmp_03);
-                dst[ki][mi].reg(3) = fmha::float2_pack<elem_type>(tmp_12, tmp_13);
-            }
-        }
     }
 
     // Pack the data to a fragment for the next GEMM.
@@ -514,25 +474,6 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
             }
         }
     }
-
-    // inline __device__ void unpack_noscale(const Accumulator (&acc)[MMAS_M][MMAS_N]) {
-    //     #pragma unroll
-    //     for( int mi = 0; mi < MMAS_M; ++mi ) {
-    //         #pragma unroll
-    //         for( int ni = 0; ni < MMAS_N; ++ni ) {
-    //             // 1st row - 4 elements per row.
-    //             this->elt_[2 * mi + 0][4 * ni + 0] = acc[mi][ni].elt(0);
-    //             this->elt_[2 * mi + 0][4 * ni + 1] = acc[mi][ni].elt(1);
-    //             this->elt_[2 * mi + 0][4 * ni + 2] = acc[mi][ni].elt(4);
-    //             this->elt_[2 * mi + 0][4 * ni + 3] = acc[mi][ni].elt(5);
-    //             // 2nd row - 4 elements per row.
-    //             this->elt_[2 * mi + 1][4 * ni + 0] = acc[mi][ni].elt(2);
-    //             this->elt_[2 * mi + 1][4 * ni + 1] = acc[mi][ni].elt(3);
-    //             this->elt_[2 * mi + 1][4 * ni + 2] = acc[mi][ni].elt(6);
-    //             this->elt_[2 * mi + 1][4 * ni + 3] = acc[mi][ni].elt(7);
-    //         }
-    //     }
-    // }
 
     template <typename FragmentC>
     inline __device__ void unpack_noscale(const FragmentC (&acc)) {
