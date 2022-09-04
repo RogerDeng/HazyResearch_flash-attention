@@ -56,19 +56,17 @@ struct FMHA_kernel_traits {
     static constexpr bool V_IN_REGS = (FLAGS & 0x100u) == 0u;
 
     // The global memory tile to load Q.
-    using Gmem_tile_q = fmha::Gmem_tile_qkv<Cta_tile_p, fmha::BITS_PER_ELEMENT_A, STEP, D, true>;
 
     // The shared memory tile to swizzle Q.
-    using Smem_tile_q = fmha::Smem_tile_a<Cta_tile_p, fmha::Row, Gmem_tile_q::BYTES_PER_LDG, 1>;
+    // using Smem_tile_q = fmha::Smem_tile_a<Cta_tile_p, fmha::Row, Gmem_tile_q::BYTES_PER_LDG, 1>;
+    using Smem_tile_q = fmha::Smem_tile_a<Cta_tile_p, fmha::Row, 16, 1>;
     // using Smem_tile_q = fmha::Smem_tile_a<Cta_tile_p, fmha::Row, Gmem_tile_q::BYTES_PER_LDG, 2>;
 
     // The global memory tile to load K.
-    using Gmem_tile_k = fmha::Gmem_tile_qkv<Cta_tile_p, fmha::BITS_PER_ELEMENT_B, S, D, true>;
     // The shared memory tile to swizzle K.
     using Smem_tile_k = fmha::Smem_tile_b<Cta_tile_p, fmha::Col>;
 
     // The global memory tile to load V.
-    using Gmem_tile_v = fmha::Gmem_tile_qkv<Cta_tile_o, fmha::BITS_PER_ELEMENT_B, S, D, true>;
     // The shared memory tile to swizzle V.
     using Smem_tile_v = fmha::Smem_tile_v<Cta_tile_o>;
 
