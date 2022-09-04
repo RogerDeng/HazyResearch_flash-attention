@@ -54,9 +54,9 @@ void run_fmha_fp16_sm80_loop_(Launch_params<FMHA_fprop_params> &launch_params,
         return;
     }
 
-    constexpr int smem_size_softmax_lse = Kernel_traits::Smem_softmax_lse::BYTES_PER_TILE;
+    constexpr size_t smem_size_softmax_lse = Kernel_traits::Smem_softmax_lse::BYTES_PER_TILE;
     // Don't need smem_size_softmax_lse if we're not looping
-    const int smem_size = fmha::get_dynamic_smem_size<Kernel_traits>()
+    const size_t smem_size = fmha::get_dynamic_smem_size<Kernel_traits>()
         + (loop_steps > 1 ? smem_size_softmax_lse : 0);
     // printf("smem_size = %d\n", smem_size);
 
