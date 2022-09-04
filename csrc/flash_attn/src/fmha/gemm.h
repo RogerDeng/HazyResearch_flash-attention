@@ -87,18 +87,6 @@ struct Hmma_tile {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-using A_type = uint16_t;
-using B_type = uint16_t;
-using C_type = uint16_t;
-using Accumulator_type = float;
-using Epilogue_type = float;
-
-constexpr int BITS_PER_ELEMENT_A = sizeof(A_type) * 8;
-constexpr int BITS_PER_ELEMENT_B = sizeof(B_type) * 8;
-constexpr int BITS_PER_ELEMENT_C = sizeof(C_type) * 8;
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 template<int M, int N, int K, int WARPS_M, int WARPS_N, int WARPS_K>
 using Cta_tile_extd = Cta_tile_<M, N, K, WARPS_M, WARPS_N, WARPS_K>;
 

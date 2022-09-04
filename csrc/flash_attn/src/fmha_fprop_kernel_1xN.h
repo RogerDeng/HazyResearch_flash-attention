@@ -34,8 +34,6 @@
 #include <fmha/utils.h>
 #include <fmha/smem_cl.h>
 
-#include <fmha/mma_core_sm75.h>
-
 #include "cutlass/cutlass.h"
 #include "cutlass/layout/layout.h"
 #include <cutlass/array.h>
@@ -247,8 +245,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     using Mma_tile_o = fmha::Hmma_tile<Cta_tile_o>;
 
     using InstructionShape = typename Kernel_traits::MmaInstructionShape;
-    using Element = cutlass::half_t;
-    using ElementAccum = float;
+    using Element = typename Kernel_traits::Element;
+    using ElementAccum = typename Kernel_traits::ElementAccum;
 
     using ThreadblockShapeQK = typename Kernel_traits::ThreadblockShapeQK;
     using LayoutQ = typename Kernel_traits::LayoutQ;
@@ -302,7 +300,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     const int tidx = threadIdx.x;
 
     const BlockInfoPadded<Kernel_traits::THREADS> binfo(params, bidb, bidh, tidx);
-    // if( binfo.stop_early() ) return;
     if( binfo.stop_early(loop_step_idx * Cta_tile_p::N) ) return;
 
     Gemm1 gemm_q_k(smem_);
@@ -318,9 +315,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     steps -= begin - begin_og;
     if (Return_softmax) { gmem_s.move(begin); }
     gmem_softmax_lse.move(begin);
-    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-    //     printf("begin = %d, steps = %d\n", begin, steps);
-    // }
 
     fmha::Mask<Cta_tile_p, Is_causal> mask(binfo, tidx, loop_step_idx);
 
@@ -343,6 +337,11 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     Smem_O_cl smem_o_cl(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
 
     // Allocate the global memory tile loader for Q.
+    // cutlass::transform::threadblock::PredicatedTileIterator deals with seqlen not divisible
+    // by 16 in a different way than we want. If the seqlen_q is 36, the first iteration would
+    // load 4 rows and the next two iterations would load 16 rows each. Instead we round the
+    // actual_seqlen_q to be multiple of 16, then change the mask in the last iteration, so
+    // that in this case we would load 16, 16, 4.
     LayoutQ gmem_layout_Q(params.q_row_stride_in_elts);
     typename GmemIteratorQ::Params gmem_Q_params(gmem_layout_Q);
     const uint32_t row_offset_q = (binfo.sum_s_q + begin * ThreadblockShapeQK::kM) * params.q_row_stride_in_elts + binfo.bidh * params.q_head_stride_in_elts;
@@ -390,26 +389,31 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                                        {actual_seqlen_q, params.d},
                                        tidx);
 
+    // Create the object to do the softmax.
+    Softmax softmax(params, &smem_[Gemm1::SMEM_OFFSET_SOFTMAX], tidx);
+
+    Smem_softmax_lse smem_softmax_lse(reinterpret_cast<float *>(&smem_[Gemm1::SMEM_BYTES]));
+
     if (!Is_first) {
         if (Return_softmax) { gmem_s.move(loop_step_idx * steps_og); }
     }
 
-    // Trigger the loads for K.
-    typename GmemIteratorK::Fragment gmem_frag_k;
-    gmem_frag_k.clear();
-    gmem_k_cl.load(gmem_frag_k);
-
-    // Trigger the loads for Q.
-    typename GmemIteratorQ::Fragment gmem_frag_q;
-    gmem_frag_q.clear();
-    gmem_q_cl.load(gmem_frag_q);
+    if (!Is_first) { __syncthreads(); }
 
     // Trigger the loads for V.
     typename GmemIteratorV::Fragment gmem_frag_v;
     gmem_frag_v.clear();
     gmem_v_cl.load(gmem_frag_v);
 
-    if (!Is_first) { __syncthreads(); }
+    // Trigger the loads for Q.
+    typename GmemIteratorQ::Fragment gmem_frag_q;
+    gmem_frag_q.clear();
+    gmem_q_cl.load(gmem_frag_q);
+
+    // Trigger the loads for K.
+    typename GmemIteratorK::Fragment gmem_frag_k;
+    gmem_frag_k.clear();
+    gmem_k_cl.load(gmem_frag_k);
 
     float p_prev_lse[Mma_tile_p::MMAS_M * 2];
     if (!Is_first) {
@@ -417,8 +421,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     }
 
     // Commit the data for Q and V to shared memory.
-    smem_q_cl.store(gmem_frag_q);
     smem_v_cl.store(gmem_frag_v);
+    smem_q_cl.store(gmem_frag_q);
 
     // Commit the data for K to shared memory.
     if( !Kernel_traits::SHARE_SMEM_FOR_K_AND_V ) {
@@ -457,11 +461,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // Load the fragments for K. 
     gemm_q_k.load_k();
 
-    // Create the object to do the softmax.
-    Softmax softmax(params, &smem_[Gemm1::SMEM_OFFSET_SOFTMAX], tidx);
-
-    Smem_softmax_lse smem_softmax_lse(reinterpret_cast<float *>(&smem_[Gemm1::SMEM_BYTES]));
-
     // Load over the entire sequence length.
     for( int l = 0; l < steps; l++ ) {
         if((begin + l) * Cta_tile_p::M >= binfo.actual_seqlen_q) break;
@@ -488,12 +487,12 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Trigger the load for the next Q values.
         if( l < steps - 1) {
             ++gmem_q_cl;
-            // if ((l + 1 == steps - 1) && (binfo.actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
+            // If actual_seqlen_q is not a multiple of 16, we change the mask in the last iteration
+            // to load the "residue" tile.
             if ((l + 1 == steps - 1) && (actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
                 // TODO: this probably only works for head_dim = 64 and head_dim = 128, which is
                 // what we have right now. Maybe for head_dim = 32 or 96, this could be different.
                 const int row_idx = tidx / (GmemIteratorQ::Shape::kColumn / GmemIteratorQ::Fragment::kElements);
-                // if (row_idx >= binfo.actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
                 if (row_idx >= actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
                     gmem_q_cl.clear_mask();
                 }
@@ -514,16 +513,11 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             // if we share K and V, it could be that V was not fully read yet but we write into smem for reduction
             __syncthreads();
         }
-        // if (!Is_first) {
-        //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-        //         printf("p_prev_lse=%.6f, %.6f\n", p_prev_lse[0], p_prev_lse[1]);
-        //     }
-        // }
+
         // Compute the max.
         float p_max[Mma_tile_p::MMAS_M * 2];
         if (!Is_first) {
             smem_softmax_lse.store_pair(p_prev_lse);
-            // for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi]; }
             for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi] / params.scale_bmm1; }
         }
 
@@ -539,7 +533,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Compute the exponential value.
         softmax.scale_apply_exp(p_max, params.scale_bmm1);
 
-        // We don't finalize the sum computation here, as that would incur an extra sync_threads().
+        // We don't finalize the sum reduction here, as that would incur an extra sync_threads().
         // Instead, we reduce the sum from each warp, write to smem, then wait until the sync_threads()
         // from storing acc_o. Then we read the sum of each warp from smem and finalize the reduction.
         // As a consequence, we don't scale acc_p by the inverse sum, we scale the output by the inverse sum.
@@ -598,8 +592,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         //     rows[jj] = tidx / Gmem_tile_o::THREADS_PER_ROW + jj * Gmem_tile_o::ROWS_PER_STG;
         // }
         using OutputTileThreadMap = typename Smem_O_cl::OutputTileThreadMap;
-        constexpr int kRowsPerThread = OutputTileThreadMap::Iterations::kRow * Smem_O_cl::kIterationsStore;
-        static_assert(Gmem_tile_o::STGS_PER_LOOP == kRowsPerThread);
+        constexpr int kOutputRowsPerThread = OutputTileThreadMap::Iterations::kRow * Smem_O_cl::kIterationsStore;
+        static_assert(Gmem_tile_o::STGS_PER_LOOP == kOutputRowsPerThread);
         cutlass::MatrixCoord output_thread_offset = OutputTileThreadMap::initial_offset(tidx);
         const int output_thread_start_row = output_thread_offset.row();
         const int output_thread_start_column = output_thread_offset.column();
@@ -608,27 +602,16 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                 rows[iter * OutputTileThreadMap::Iterations::kRow + row] = output_thread_start_row + iter * OutputTileThreadMap::Shape::kRow + row;
             }
         }
-        // When d = 16, O only has 16 x 16 = 256 elements, and each of the 128 threads wants
-        // to write 4 elements, so only half of the thread should deal with O.
-        bool o_rows_are_valid =
-            (Kernel_traits::THREADS <= Gmem_tile_o::THREADS_PER_ROW * Gmem_tile_o::ROWS)
-            || (tidx / Gmem_tile_o::THREADS_PER_ROW < Gmem_tile_o::ROWS);
-        if (o_rows_are_valid) {
-            softmax.reduce_max_after_sync_(p_max_o, rows);
-        }
+
+        softmax.reduce_max_after_sync_(p_max_o, rows);
         static_assert(Mma_tile_o::MMAS_M == 1);
         for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
             p_max_o[jj][0] *= params.scale_bmm1;
         }
         float p_prev_scale_o[Gmem_tile_o::STGS_PER_LOOP];
-        if ((!Is_first) && o_rows_are_valid) {
+        if (!Is_first) {
             smem_softmax_lse.load(p_prev_scale_o, rows);
         }
-        // if (!Is_first) {
-        //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-        //         printf("p_prev_scale_o=%.6f\n", p_prev_scale_o[0]);
-        //     }
-        // }
 
         static_assert(Gmem_tile_o::LOOPS == 1);
 
@@ -637,9 +620,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         static_assert(Mma_tile_o::MMAS_M == 1);
         float p_sum_o[Gmem_tile_o::STGS_PER_LOOP][Mma_tile_o::MMAS_M];
-        if (o_rows_are_valid) {
-            softmax.reduce_sum_after_sync_(p_sum_o, rows);
-        }
+        softmax.reduce_sum_after_sync_(p_sum_o, rows);
         if (!Is_first) {
             for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
                 p_prev_scale_o[jj] = expf(p_prev_scale_o[jj] - p_max_o[jj][0]);
@@ -652,19 +633,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
             float sum = p_sum_o[jj][0];
             p_sum_log[jj][0] = (sum == 0.f || sum != sum) ? -INFINITY : p_max_o[jj][0] + __logf(sum);
-            // if (sum == 0.f || sum != sum) {
-            //     printf("loop_step_idx = %d, l = %d, tidx = %d, sum = %.6f, p_max_o = %.6f\n", loop_step_idx, l, tidx, sum, p_max_o[jj][0]);
-            // }
-            // if (Is_first) {
-            //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-            //         printf("p_sum_log=%.6f\n", p_sum_log[jj][0]);
-            //     }
-            // }
-            // TODO: not sure if checking output_thread_start_column == 0 is right.
-            if ((output_thread_start_column == 0) && o_rows_are_valid) {
-                // if ((blockIdx.x == 0) && (blockIdx.y == 0)) {
-                //     printf("thread %d storing lse, jj = %d, rows[jj] = %d, p_sum_log[jj] = %f\n", tidx, jj, rows[jj], p_sum_log[jj][0]);
-                // }
+            if (output_thread_start_column == 0) {
                 gmem_softmax_lse.store_row(
                     reinterpret_cast<uint32_t(&)[Mma_tile_p::MMAS_M]>(p_sum_log[jj]), rows[jj]);
             }
@@ -673,10 +642,10 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         // Load from shared memory.
         using ArrayTypeO = cutlass::Array<ElementAccum, OutputTileThreadMap::kElementsPerAccess>;
-        static_assert(OutputTileThreadMap::kElementsPerAccess * kRowsPerThread == Smem_O_cl::kIterationsStore * Smem_O_cl::OutputFragment::kElements);
+        static_assert(OutputTileThreadMap::kElementsPerAccess * kOutputRowsPerThread == Smem_O_cl::kIterationsStore * Smem_O_cl::OutputFragment::kElements);
         cutlass::multiplies<ArrayTypeO> multiply_fragments;
         if (!Is_first) {
-            auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kRowsPerThread]>(out_cl);
+            auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kOutputRowsPerThread]>(out_cl);
             for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
                 out_cl_reshaped[jj] = multiply_fragments(out_cl_reshaped[jj], p_prev_scale_o[jj]);
             }
@@ -690,7 +659,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             Is_last
             || ((loop_step_idx + 1) * Cta_tile_p::N >= binfo.actual_seqlen_k)
             || ((Is_causal) && ((begin + l) * Cta_tile_p::M < (loop_step_idx + 1) * Cta_tile_p::N));
-        auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kRowsPerThread]>(out_cl);
+        auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kOutputRowsPerThread]>(out_cl);
         #pragma unroll
         for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
             float sum = p_sum_o[jj][0];
@@ -747,6 +716,9 @@ inline __device__ void device_1xN_loop(const Params &params) {
 
     const int tidx_global = (bidb * params.h + bidh) * blockDim.x * 2 + tidx;
     auto seeds = at::cuda::philox::unpack(params.philox_args);
+    // We use 2 Philox generators to match the dropout pattern in the backward pass.
+    // Forward pass uses 128 threads while backward pass uses 256 threads, so each thread
+    // in the forward pass is simulating the droout pattern of 2 threads in the backward pass.
     Philox ph0(std::get<0>(seeds), tidx_global, std::get<1>(seeds));
     Philox ph1(std::get<0>(seeds), tidx_global + blockDim.x, std::get<1>(seeds));
     constexpr int M = Kernel_traits::Cta_tile_p::M;

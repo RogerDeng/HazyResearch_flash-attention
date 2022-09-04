@@ -78,9 +78,6 @@ struct FMHA_kernel_traits {
 
     using elem_type = elem_type_;
 
-    // Make sure the number of threads match.
-    // static_assert((int)Gmem_tile_o::THREADS_PER_ROW == (int)Smem_tile_o::THREADS_PER_ROW, "");
-
     // The number of threads.
     static constexpr int THREADS = Cta_tile_p::THREADS_PER_CTA;
     // Make sure the number of threads matches both CTAs.
