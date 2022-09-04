@@ -57,7 +57,7 @@ namespace fmha {
 
 template<typename Kernel_traits>
 struct Gemm_Q_K_base {
-    using Smem_O_cl = fmha::FMHAEpilogue<typename Kernel_traits::MmaCorePV>;
+    using Smem_O = fmha::FMHAEpilogue<typename Kernel_traits::MmaCorePV>;
     using WarpMma = typename Kernel_traits::MmaCoreQK::MmaTensorOp;
 
     // The description of the CTA tile for the 1st batched GEMM.
@@ -94,7 +94,7 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
 
     using Base = Gemm_Q_K_base<Kernel_traits>;
     using Cta_tile_p = typename Base::Cta_tile_p;
-    using Smem_O_cl = typename Base::Smem_O_cl;
+    using Smem_O = typename Base::Smem_O;
     using WarpMma = typename Base::WarpMma;
 
     static constexpr int kIterations = WarpMma::Shape::kK / WarpMma::InstructionShape::kK;
@@ -104,14 +104,14 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
     static_assert(Kernel_traits::V_IN_REGS);
 
     static constexpr size_t SMEM_OFFSET_O = Kernel_traits::BYTES_PER_SMEM_Q;
-    static constexpr size_t SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + sizeof(typename Smem_O_cl::SharedStorage);
+    static constexpr size_t SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + sizeof(typename Smem_O::SharedStorage);
     static constexpr size_t SMEM_OFFSET_V = Kernel_traits::BYTES_PER_SMEM_Q + (SHARE_SMEM_FOR_K_AND_V ? 0 : Kernel_traits::BYTES_PER_SMEM_K);
 
     // Q | K / V
     //   | O | SOFTMAX
     static constexpr size_t SMEM_BYTES = Kernel_traits::BYTES_PER_SMEM_Q
         + std::max((size_t)(SHARE_SMEM_FOR_K_AND_V ? 1 : 2) * Kernel_traits::BYTES_PER_SMEM_K,
-                   sizeof(typename Smem_O_cl::SharedStorage) + Base::SMEM_BYTES_SOFTMAX);
+                   sizeof(typename Smem_O::SharedStorage) + Base::SMEM_BYTES_SOFTMAX);
 
     __device__ inline Gemm_Q_K(char * smem_)
         : Base(smem_, smem_ + Kernel_traits::BYTES_PER_SMEM_Q) {
@@ -155,7 +155,7 @@ template<typename Kernel_traits>
 struct Gemm_Q_K<Kernel_traits, false> : public Gemm_Q_K_base<Kernel_traits> {
     using Base = Gemm_Q_K_base<Kernel_traits>;
     using Cta_tile_p = typename Base::Cta_tile_p;
-    using Smem_O_cl = typename Base::Smem_O_cl;
+    using Smem_O = typename Base::Smem_O;
     using WarpMma = typename Base::WarpMma;
 
     static constexpr bool SHARE_SMEM_FOR_K_AND_V = Kernel_traits::SHARE_SMEM_FOR_K_AND_V;
@@ -164,13 +164,13 @@ struct Gemm_Q_K<Kernel_traits, false> : public Gemm_Q_K_base<Kernel_traits> {
 
     static constexpr size_t SMEM_OFFSET_V = Kernel_traits::BYTES_PER_SMEM_Q + (SHARE_SMEM_FOR_K_AND_V ? 0 : Kernel_traits::BYTES_PER_SMEM_K);
     static constexpr size_t SMEM_OFFSET_O = SMEM_OFFSET_V + Kernel_traits::BYTES_PER_SMEM_V;
-    static constexpr size_t SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + sizeof(typename Smem_O_cl::SharedStorage);
+    static constexpr size_t SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + sizeof(typename Smem_O::SharedStorage);
 
     // If V_IN_REGS and SHARE_SMEM_FOR_K_AND_V:      Q | K/V | O | SOFTMAX
     // If !V_IN_REGS (then !SHARE_SMEM_FOR_K_AND_V): Q | K   | V | O | SOFTMAX
     static constexpr size_t SMEM_BYTES = Kernel_traits::BYTES_PER_SMEM_Q
         + (SHARE_SMEM_FOR_K_AND_V ? 1 : 2) * Kernel_traits::BYTES_PER_SMEM_K
-        + sizeof(typename Smem_O_cl::SharedStorage) + Base::SMEM_BYTES_SOFTMAX;
+        + sizeof(typename Smem_O::SharedStorage) + Base::SMEM_BYTES_SOFTMAX;
 
     __device__ inline Gemm_Q_K(char * smem_)
         : Base(smem_, smem_ + Kernel_traits::BYTES_PER_SMEM_Q) {
@@ -321,17 +321,17 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // Allocate the shared memory tile loader for V. We use the same as K so be careful!!!
 
     SmemLayoutQ layout_Q = SmemLayoutQ::packed({ThreadblockShapeQK::kM, ThreadblockShapeQK::kK});
-    SmemIteratorQ smem_q_cl({reinterpret_cast<Element *>(smem_), layout_Q}, tidx);
+    SmemIteratorQ smem_q({reinterpret_cast<Element *>(smem_), layout_Q}, tidx);
     SmemLayoutK layout_K = SmemLayoutK::packed({ThreadblockShapeQK::kK, ThreadblockShapeQK::kN});
-    SmemIteratorK smem_k_cl({reinterpret_cast<Element *>(smem_ + Kernel_traits::BYTES_PER_SMEM_Q), layout_K}, tidx);
+    SmemIteratorK smem_k({reinterpret_cast<Element *>(smem_ + Kernel_traits::BYTES_PER_SMEM_Q), layout_K}, tidx);
     SmemLayoutV layout_V = SmemLayoutV::packed({ThreadblockShapePV::kK, ThreadblockShapePV::kN});
     // SmemIterator stores to smem and WarpIterator loads from smem
-    SmemIteratorV smem_v_cl({reinterpret_cast<Element *>(smem_v_addr), layout_V}, tidx);
+    SmemIteratorV smem_v({reinterpret_cast<Element *>(smem_v_addr), layout_V}, tidx);
     WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_addr), layout_V}, threadIdx.x % 32);
 
     // Allocate the shared memory tile loader for O. We use the same as K so be careful!!!
-    using Smem_O_cl = fmha::FMHAEpilogue<MmaCorePV>;
-    Smem_O_cl smem_o_cl(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
+    using Smem_O = fmha::FMHAEpilogue<MmaCorePV>;
+    Smem_O smem_o(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
 
     // Allocate the global memory tile loader for Q.
     // cutlass::transform::threadblock::PredicatedTileIterator deals with seqlen not divisible
@@ -345,46 +345,45 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     const int actual_seqlen_q = binfo.actual_seqlen_q - begin * ThreadblockShapeQK::kM;
     const int seqlen_q_remainder = actual_seqlen_q % ThreadblockShapeQK::kM;
     const int extent_q = ((actual_seqlen_q <= ThreadblockShapeQK::kM) || (seqlen_q_remainder == 0)) ? actual_seqlen_q : actual_seqlen_q + ThreadblockShapeQK::kM - seqlen_q_remainder;
-    GmemIteratorQ gmem_q_cl(gmem_Q_params,
-                            reinterpret_cast<Element *>(params.q_ptr) + row_offset_q,
-                            {extent_q, params.d},
-                            tidx);
+    GmemIteratorQ gmem_q(gmem_Q_params,
+                         reinterpret_cast<Element *>(params.q_ptr) + row_offset_q,
+                         {extent_q, params.d},
+                         tidx);
 
     // Allocate the global memory tile loader for K.
     LayoutK gmem_layout_K(params.k_row_stride_in_elts);
     typename GmemIteratorK::Params gmem_K_params(gmem_layout_K);
     const uint32_t row_offset_k = (binfo.sum_s_k + loop_step_idx * ThreadblockShapeQK::kN) * params.k_row_stride_in_elts + binfo.bidh * params.k_head_stride_in_elts;
     const int extent_k = min(binfo.actual_seqlen_k - loop_step_idx * ThreadblockShapeQK::kN, ThreadblockShapeQK::kN);
-    GmemIteratorK gmem_k_cl(gmem_K_params,
-                            reinterpret_cast<Element *>(params.k_ptr) + row_offset_k,
-                            // {ThreadblockShapeQK::kK, extent_k},
-                            {params.d, extent_k},
-                            tidx);
+    GmemIteratorK gmem_k(gmem_K_params,
+                         reinterpret_cast<Element *>(params.k_ptr) + row_offset_k,
+                         {params.d, extent_k},
+                         tidx);
 
     // Allocate the global memory tile loader for V.
     LayoutV gmem_layout_V(params.v_row_stride_in_elts);
     typename GmemIteratorV::Params gmem_V_params(gmem_layout_V);
     const uint32_t row_offset_v = (binfo.sum_s_k + loop_step_idx * ThreadblockShapePV::kK) * params.v_row_stride_in_elts + binfo.bidh * params.v_head_stride_in_elts;
     // extent_v is the same as extent_k
-    GmemIteratorV gmem_v_cl(gmem_V_params,
-                            reinterpret_cast<Element *>(params.v_ptr) + row_offset_v,
-                            {extent_k, params.d},
-                            tidx);
+    GmemIteratorV gmem_v(gmem_V_params,
+                         reinterpret_cast<Element *>(params.v_ptr) + row_offset_v,
+                         {extent_k, params.d},
+                         tidx);
 
     // Allocate the global memory tile loader for O.
     LayoutO gmem_layout_O(params.o_row_stride_in_elts);
     typename GmemIteratorO::Params gmem_O_params(gmem_layout_O);
     const uint32_t row_offset_o = (binfo.sum_s_q + begin * ThreadblockShapeQK::kM) * params.o_row_stride_in_elts + binfo.bidh * params.o_head_stride_in_elts;
-    GmemIteratorO gmem_o_cl(gmem_O_params,
-                            reinterpret_cast<Element *>(params.o_ptr) + row_offset_o,
-                            {actual_seqlen_q, params.d},
-                            tidx);
+    GmemIteratorO gmem_o(gmem_O_params,
+                         reinterpret_cast<Element *>(params.o_ptr) + row_offset_o,
+                         {actual_seqlen_q, params.d},
+                         tidx);
 
     typename GmemIteratorOAccum::Params gmem_Oaccum_params(gmem_layout_O);
-    GmemIteratorOAccum gmem_o_accum_cl(gmem_Oaccum_params,
-                                       reinterpret_cast<ElementAccum *>(params.o_tmp_ptr) + row_offset_o,
-                                       {actual_seqlen_q, params.d},
-                                       tidx);
+    GmemIteratorOAccum gmem_o_accum(gmem_Oaccum_params,
+                                    reinterpret_cast<ElementAccum *>(params.o_tmp_ptr) + row_offset_o,
+                                    {actual_seqlen_q, params.d},
+                                    tidx);
 
     // Create the object to do the softmax.
     Softmax softmax(params, &smem_[Gemm1::SMEM_OFFSET_SOFTMAX], tidx);
@@ -400,17 +399,17 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // Trigger the loads for V.
     typename GmemIteratorV::Fragment gmem_frag_v;
     gmem_frag_v.clear();
-    gmem_v_cl.load(gmem_frag_v);
+    gmem_v.load(gmem_frag_v);
 
     // Trigger the loads for Q.
     typename GmemIteratorQ::Fragment gmem_frag_q;
     gmem_frag_q.clear();
-    gmem_q_cl.load(gmem_frag_q);
+    gmem_q.load(gmem_frag_q);
 
     // Trigger the loads for K.
     typename GmemIteratorK::Fragment gmem_frag_k;
     gmem_frag_k.clear();
-    gmem_k_cl.load(gmem_frag_k);
+    gmem_k.load(gmem_frag_k);
 
     float p_prev_lse[Mma_tile_p::MMAS_M * 2];
     if (!Is_first) {
@@ -418,12 +417,12 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     }
 
     // Commit the data for Q and V to shared memory.
-    smem_v_cl.store(gmem_frag_v);
-    smem_q_cl.store(gmem_frag_q);
+    smem_v.store(gmem_frag_v);
+    smem_q.store(gmem_frag_q);
 
     // Commit the data for K to shared memory.
     if( !Kernel_traits::SHARE_SMEM_FOR_K_AND_V ) {
-        smem_k_cl.store(gmem_frag_k);
+        smem_k.store(gmem_frag_k);
     }
 
     __syncthreads();
@@ -435,11 +434,11 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // kernel. copied from mma_pipelined.h
     const int warp_idx = threadIdx.x / 32;
     iter_V.add_tile_offset({kIterationsPV * warp_idx, 0});
-    typename WarpIteratorV::Fragment frag_v_cl[kIterationsPV];
+    typename WarpIteratorV::Fragment frag_v[kIterationsPV];
     static_assert(WarpIteratorV::Fragment::kStorageElements == 4 * Mma_tile_o::MMAS_N || WarpIteratorV::Fragment::kStorageElements == 2 * Mma_tile_o::MMAS_N );
     #pragma unroll
     for( int ki = 0; ki < kIterationsPV; ++ki ) {
-        iter_V.load(frag_v_cl[ki]);
+        iter_V.load(frag_v[ki]);
         ++iter_V;
     }
 
@@ -449,7 +448,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         __syncthreads();
 
         // Commit the data to shared memory for K.
-        smem_k_cl.store(gmem_frag_k);
+        smem_k.store(gmem_frag_k);
 
         // Make sure the data is in shared memory.
         __syncthreads();
@@ -470,20 +469,20 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Do this part of P = Q * K^T.
         gemm_q_k(mma_qk, acc_p);
 
-        typename Smem_O_cl::OutputFragment out_cl[Smem_O_cl::kIterationsStore];
-        static_assert(GmemIteratorOAccum::kIterations == Smem_O_cl::kIterationsStore);
-        static_assert(GmemIteratorO::kIterations == Smem_O_cl::kIterationsStore);
+        typename Smem_O::OutputFragment out[Smem_O::kIterationsStore];
+        static_assert(GmemIteratorOAccum::kIterations == Smem_O::kIterationsStore);
+        static_assert(GmemIteratorO::kIterations == Smem_O::kIterationsStore);
         if (!Is_first) {
             #pragma unroll
             for (int iter = 0; iter < GmemIteratorOAccum::kIterations; ++iter) {
-                gmem_o_accum_cl.load(out_cl[iter]);
-                gmem_o_accum_cl.move();
+                gmem_o_accum.load(out[iter]);
+                gmem_o_accum.move();
             }
         }
 
         // Trigger the load for the next Q values.
         if( l < steps - 1) {
-            ++gmem_q_cl;
+            ++gmem_q;
             // If actual_seqlen_q is not a multiple of 16, we change the mask in the last iteration
             // to load the "residue" tile.
             if ((l + 1 == steps - 1) && (actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
@@ -491,10 +490,10 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                 // what we have right now. Maybe for head_dim = 32 or 96, this could be different.
                 const int row_idx = tidx / (GmemIteratorQ::Shape::kColumn / GmemIteratorQ::Fragment::kElements);
                 if (row_idx >= actual_seqlen_q - (l + 1) * ThreadblockShapeQK::kM) {
-                    gmem_q_cl.clear_mask();
+                    gmem_q.clear_mask();
                 }
             }
-            gmem_q_cl.load(gmem_frag_q);
+            gmem_q.load(gmem_frag_q);
         }
 
         // Load the mask for that iteration.
@@ -551,12 +550,12 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         auto frag_p = convert_p(acc_p);
 
         if (Return_softmax) {
-            gmem_s.store_cl(reinterpret_cast<const cutlass::Array<Element, 8>(&)[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_M]>(frag_p), mask);
+            gmem_s.store(reinterpret_cast<const cutlass::Array<Element, 8>(&)[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_M]>(frag_p), mask);
             gmem_s.move();
         }
 
         // Commit the values for Q into shared memory.
-        if (l < steps - 1) { smem_q_cl.store(gmem_frag_q); }
+        if (l < steps - 1) { smem_q.store(gmem_frag_q); }
 
         if (Is_dropout && encode_dropout_in_sign_bit) {
             cutlass::epilogue::thread::ReLu<decltype(frag_p)> relu;
@@ -565,9 +564,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         // Declare the accumulators for the 2nd gemm.
         WarpMmaPV mma_pv;
-        typename WarpMmaPV::FragmentC acc_o_cl;
+        typename WarpMmaPV::FragmentC acc_o;
         static_assert(WarpMmaPV::FragmentC::kElements == Mma_tile_o::MMAS_M * Mma_tile_o::MMAS_N * 8);
-        acc_o_cl.clear();
+        acc_o.clear();
 
         // For some reason, WarpMmaPV::FragmentA has length K * N * (8|4) instead of just N * (8|4).
         // We have to first cast frag_p to be array of k x (N * (8|4)), then cast each row to be
@@ -576,21 +575,21 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         const auto frag_p_reshaped = reinterpret_cast<const cutlass::Array<Element, WarpMmaPV::FragmentA::kElements> (&)[kIterationsPV]>(frag_p);
         #pragma unroll
         for( int ki = 0; ki < kIterationsPV; ++ki ) {
-            mma_pv(acc_o_cl, reinterpret_cast<const typename WarpMmaPV::FragmentA(&)>(frag_p_reshaped[ki]), frag_v_cl[ki], acc_o_cl);
+            mma_pv(acc_o, reinterpret_cast<const typename WarpMmaPV::FragmentA(&)>(frag_p_reshaped[ki]), frag_v[ki], acc_o);
         }
         // Swizzle the elements and do the final reduction.
-        smem_o_cl.store(acc_o_cl);
+        smem_o.store(acc_o);
 
         // The mapping from tidx to rows changes between the softmax and the
         // O-reduction. So we recalculate the max.
-        using OutputTileThreadMap = typename Smem_O_cl::OutputTileThreadMap;
-        constexpr int kOutputRowsPerThread = OutputTileThreadMap::Iterations::kRow * Smem_O_cl::kIterationsStore;
+        using OutputTileThreadMap = typename Smem_O::OutputTileThreadMap;
+        constexpr int kOutputRowsPerThread = OutputTileThreadMap::Iterations::kRow * Smem_O::kIterationsStore;
         float p_max_o[kOutputRowsPerThread][Mma_tile_o::MMAS_M];
         int rows[kOutputRowsPerThread];
         cutlass::MatrixCoord output_thread_offset = OutputTileThreadMap::initial_offset(tidx);
         const int output_thread_start_row = output_thread_offset.row();
         const int output_thread_start_column = output_thread_offset.column();
-        for (int iter = 0; iter < Smem_O_cl::kIterationsStore; ++iter) {
+        for (int iter = 0; iter < Smem_O::kIterationsStore; ++iter) {
             for (int row = 0; row < OutputTileThreadMap::Iterations::kRow; ++row) {
                 rows[iter * OutputTileThreadMap::Iterations::kRow + row] = output_thread_start_row + iter * OutputTileThreadMap::Shape::kRow + row;
             }
@@ -633,21 +632,21 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         // Load from shared memory.
         using ArrayTypeO = cutlass::Array<ElementAccum, OutputTileThreadMap::kElementsPerAccess>;
-        static_assert(OutputTileThreadMap::kElementsPerAccess * kOutputRowsPerThread == Smem_O_cl::kIterationsStore * Smem_O_cl::OutputFragment::kElements);
+        static_assert(OutputTileThreadMap::kElementsPerAccess * kOutputRowsPerThread == Smem_O::kIterationsStore * Smem_O::OutputFragment::kElements);
         cutlass::multiplies<ArrayTypeO> multiply_fragments;
         if (!Is_first) {
-            auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kOutputRowsPerThread]>(out_cl);
+            auto out_reshaped = reinterpret_cast<ArrayTypeO (&)[kOutputRowsPerThread]>(out);
             for (int jj = 0; jj < kOutputRowsPerThread; jj++) {
-                out_cl_reshaped[jj] = multiply_fragments(out_cl_reshaped[jj], p_prev_scale_o[jj]);
+                out_reshaped[jj] = multiply_fragments(out_reshaped[jj], p_prev_scale_o[jj]);
             }
         }
-        smem_o_cl.template load</*zero_init=*/Is_first>(out_cl, tidx);
+        smem_o.template load</*zero_init=*/Is_first>(out, tidx);
 
         const bool is_final_write =
             Is_last
             || ((loop_step_idx + 1) * Cta_tile_p::N >= binfo.actual_seqlen_k)
             || ((Is_causal) && ((begin + l) * Cta_tile_p::M < (loop_step_idx + 1) * Cta_tile_p::N));
-        auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kOutputRowsPerThread]>(out_cl);
+        auto out_reshaped = reinterpret_cast<ArrayTypeO (&)[kOutputRowsPerThread]>(out);
         #pragma unroll
         for (int jj = 0; jj < kOutputRowsPerThread; jj++) {
             float sum = p_sum_o[jj][0];
@@ -655,28 +654,28 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             if (Is_dropout && is_final_write) {
                 inv_sum *= params.rp_dropout;
             }
-            out_cl_reshaped[jj] = multiply_fragments(out_cl_reshaped[jj], inv_sum);
+            out_reshaped[jj] = multiply_fragments(out_reshaped[jj], inv_sum);
         }
 
         // Output the values.
         if (is_final_write) {
-            typename GmemIteratorO::Fragment out_cl_converted;
-            cutlass::NumericArrayConverter<Element, ElementAccum, decltype(out_cl_converted)::kElements, cutlass::FloatRoundStyle::round_to_nearest> convert_o;
+            typename GmemIteratorO::Fragment out_converted;
+            cutlass::NumericArrayConverter<Element, ElementAccum, decltype(out_converted)::kElements, cutlass::FloatRoundStyle::round_to_nearest> convert_o;
             #pragma unroll
             for (int iter = 0; iter < GmemIteratorO::kIterations; ++iter) {
-                out_cl_converted = convert_o(out_cl[iter]);
-                gmem_o_cl.store(out_cl_converted);
-                gmem_o_cl.move();
+                out_converted = convert_o(out[iter]);
+                gmem_o.store(out_converted);
+                gmem_o.move();
             }
-            // We also need to move gmem_o_accum_cl. For example, if Is_causal=true and seqlen=512,
-            // in the first loop, we write the first 256 rows to gmem_o_cl and the last 256 rows to gmem_o_accum_cl.
-            if (Is_first && !Is_last) { gmem_o_accum_cl.move(GmemIteratorOAccum::kIterations); }
+            // We also need to move gmem_o_accum. For example, if Is_causal=true and seqlen=512,
+            // in the first loop, we write the first 256 rows to gmem_o and the last 256 rows to gmem_o_accum.
+            if (Is_first && !Is_last) { gmem_o_accum.move(GmemIteratorOAccum::kIterations); }
         } else {
-            if (!Is_first) { gmem_o_accum_cl.move(-GmemIteratorOAccum::kIterations); }
+            if (!Is_first) { gmem_o_accum.move(-GmemIteratorOAccum::kIterations); }
             #pragma unroll
             for (int iter = 0; iter < GmemIteratorOAccum::kIterations; ++iter) {
-                gmem_o_accum_cl.store(out_cl[iter]);
-                gmem_o_accum_cl.move();
+                gmem_o_accum.store(out[iter]);
+                gmem_o_accum.move();
             }
         }
 
