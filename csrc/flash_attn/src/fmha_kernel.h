@@ -31,11 +31,12 @@
 #include <philox.cuh>
 
 #include <fmha.h>
-#include <fmha/utils.h>
-#include <fmha/smem_tile.h>
+#include <fmha/gemm.h>
 #include <fmha/gmem_tile.h>
 #include <fmha/mask.h>
 #include <fmha/softmax.h>
+#include <fmha/summary_stats.h>
+#include <fmha/utils.h>
 
 namespace fmha {
 

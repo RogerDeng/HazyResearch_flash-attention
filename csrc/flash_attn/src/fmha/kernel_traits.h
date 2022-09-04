@@ -36,6 +36,8 @@
 #include <cutlass/numeric_types.h>
 #include "cutlass/transform/threadblock/predicated_tile_iterator.h"
 
+#include <fmha/gemm.h>
+#include <fmha/summary_stats.h>
 #include <fmha/mma_core_sm75.h>
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
