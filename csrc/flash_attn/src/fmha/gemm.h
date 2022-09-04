@@ -165,53 +165,6 @@ struct Fragment_b : public Fragment<uint16_t, 8> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-struct Fragment_accumulator : public Fragment<float, 8> {
-
-    // The base class.
-    using Base = Fragment<float, 8>;
-
-    // Add two fragments.
-    template< typename Other_fragment_ >
-    inline __device__ void add(const Other_fragment_ &other) {
-        for( int ii = 0; ii < Base::NUM_ELTS; ++ii ) {
-            this->elt(ii) = this->elt(ii) + other.elt(ii);
-        }
-    }
-
-    inline __device__ void mul_(const float other) {
-        for( int ii = 0; ii < Base::NUM_ELTS; ++ii ) {
-            this->elt(ii) *= other;
-        }
-    }
-
-    // Do the HMMA.
-    template< typename Layout_a, typename Layout_b >
-    inline __device__ void mma(const Fragment_a<Layout_a> &a,
-                               const Fragment_b<Layout_b> &b) {
-        asm volatile( \
-            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 \n" \
-            "    {%0, %1, %2, %3}, \n" \
-            "    {%4, %5, %6, %7}, \n" \
-            "    {%8, %9}, \n" \
-            "    {%0, %1, %2, %3}; \n" \
-                    : "+f"(  elt(0)), "+f"(  elt(1)), "+f"(  elt(2)), "+f"(  elt(3))
-                    :  "r"(a.reg(0)),  "r"(a.reg(1)),  "r"(a.reg(2)),  "r"(a.reg(3))
-                    ,  "r"(b.reg(0)),  "r"(b.reg(1)));
-        asm volatile( \
-            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 \n" \
-            "    {%0, %1, %2, %3}, \n" \
-            "    {%4, %5, %6, %7}, \n" \
-            "    {%8, %9}, \n" \
-            "    {%0, %1, %2, %3}; \n" \
-                    : "+f"(  elt(4)), "+f"(  elt(5)), "+f"(  elt(6)), "+f"(  elt(7))
-                    :  "r"(a.reg(0)),  "r"(a.reg(1)),  "r"(a.reg(2)),  "r"(a.reg(3))
-                    ,  "r"(b.reg(2)),  "r"(b.reg(3)));
-    }
-
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 template<
     // The number of rows in the CTA tile.
     int M_,
@@ -255,30 +208,6 @@ struct Hmma_tile {
         MMAS_N = DivUpConstexpr(Cta_tile::N, N_PER_MMA_PER_CTA),
         MMAS_K = DivUpConstexpr(Cta_tile::K, K_PER_MMA_PER_CTA);
 
-    // // The number of elements computed per warp.
-    // static constexpr int M_PER_WARP = MMAS_M * M_PER_MMA,
-    //     N_PER_WARP = MMAS_N * N_PER_MMA,
-    //     K_PER_WARP = MMAS_K * K_PER_MMA;
-
-    using Shape = cutlass::gemm::GemmShape<MMAS_M * M_PER_MMA, MMAS_N * M_PER_MMA, K_PER_MMA>;
-    using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
-    using Element = cutlass::half_t;
-    using ElementC = float;
-    // using LayoutA = cutlass::layout::RowMajor;
-    // Cutlass's Crosswise only supports at most 64
-    static constexpr int kCrosswise = std::min(Cta_tile::K, 64);
-    using LayoutA = cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<
-        cutlass::sizeof_bits<Element>::value, kCrosswise>;
-    using LayoutB = cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<
-        cutlass::sizeof_bits<Element>::value, kCrosswise>;
-
-    using WarpMma = typename cutlass::gemm::warp::DefaultMmaTensorOp<
-        Shape, InstructionShape, Element, LayoutA, Element, LayoutB, ElementC,
-        cutlass::layout::RowMajor, cutlass::arch::OpMultiplyAdd, 1, true>::Type;
-
-    static_assert(Shape::kM % InstructionShape::kM == 0);
-    static_assert(Shape::kM % InstructionShape::kN == 0);
-    static_assert(Shape::kM % InstructionShape::kK == 0);
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
