@@ -68,15 +68,10 @@ struct Gemm_Q_K_base {
     // The description of the CTA tile for the 1st batched GEMM.
     using Cta_tile_p = typename Kernel_traits::Cta_tile_p;
 
-    // The MMA tile for the 1st GEMM.
-    using Mma_tile_p = fmha::Hmma_tile<Cta_tile_p>;
-
     static constexpr int SMEM_BYTES_SOFTMAX = Cta_tile_p::M * Cta_tile_p::WARPS_N * sizeof(float) * 2;
 
     __device__ inline Gemm_Q_K_base(char * smem_ptr_q, char * smem_ptr_k, const int tidx) 
-        : smem_q(smem_ptr_q, tidx)
-        , smem_k(smem_ptr_k, tidx)
-        , smem_q_ptr(smem_ptr_q)
+        : smem_q_ptr(smem_ptr_q)
         , smem_k_ptr(smem_ptr_k) {
 
     }
@@ -94,23 +89,19 @@ struct Gemm_Q_K_base {
         iter_A.load(frag_q[0]);
     }
 
-    Smem_tile_q smem_q;
-    Smem_tile_k smem_k;
     typename WarpMma::FragmentA frag_q[2];
     char *smem_q_ptr;
     char *smem_k_ptr;
 };
 
-template<typename Kernel_traits, typename WarpMma, bool K_in_regs, typename elem_type_=__half>
+template<typename Kernel_traits, typename WarpMma, bool K_in_regs>
 struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
 
     using Base = Gemm_Q_K_base<Kernel_traits, WarpMma>;
     using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
-    using Mma_tile_p = typename Base::Mma_tile_p;
     using Cta_tile_p = typename Base::Cta_tile_p;
-    using elem_type = elem_type_;
     using Smem_O_cl = typename Base::Smem_O_cl;
 
     static constexpr int kIterations = WarpMma::Shape::kK / WarpMma::InstructionShape::kK;
@@ -166,20 +157,17 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
     }
 
     typename WarpMma::FragmentB frag_k[kIterations];
-    static_assert(WarpMma::FragmentB::kStorageElements == 4 * Mma_tile_p::MMAS_N || WarpMma::FragmentB::kStorageElements == 2 * Mma_tile_p::MMAS_N);
 };
 
 
-template<typename Kernel_traits, typename WarpMma, typename elem_type_>
-struct Gemm_Q_K<Kernel_traits, WarpMma, false, elem_type_> : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
+template<typename Kernel_traits, typename WarpMma>
+struct Gemm_Q_K<Kernel_traits, WarpMma, false> : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
     using Base = Gemm_Q_K_base<Kernel_traits, WarpMma>;
     using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
     using Smem_tile_v = typename Kernel_traits::Smem_tile_v;
     using Cta_tile_p = typename Base::Cta_tile_p;
-    using Mma_tile_p = typename Base::Mma_tile_p;
-    using elem_type = elem_type_;
     using Smem_O_cl = typename Base::Smem_O_cl;
 
     static constexpr bool SHARE_SMEM_FOR_K_AND_V = Kernel_traits::SHARE_SMEM_FOR_K_AND_V;
@@ -351,9 +339,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
       typename MmaCorePV::IteratorThreadMapB
     >;
 
-    // The shared memory tile to swizzle V.
-    using Smem_tile_v = typename Kernel_traits::Smem_tile_v;
-
     // The global memory tile to store O.
     using GmemIteratorO = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIterator;
     using GmemIteratorOAccum = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIteratorAccum;
@@ -368,7 +353,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
     using Smem_softmax_sum = typename Kernel_traits::Smem_dp_sum;
 
-    using Gemm1 = Gemm_Q_K<Kernel_traits, WarpMmaQK, Kernel_traits::K_IN_REGS, elem_type>;
+    using Gemm1 = Gemm_Q_K<Kernel_traits, WarpMmaQK, Kernel_traits::K_IN_REGS>;
 
     using Softmax = fmha::Softmax<Cta_tile_p, Kernel_traits>;
 
@@ -402,10 +387,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     fmha::Mask<Cta_tile_p, Is_causal> mask(binfo, tidx, loop_step_idx);
 
     // The base pointer of smem_v;
-    char *smem_v_ = &smem_[Gemm1::SMEM_OFFSET_V];
+    char *smem_v_addr = &smem_[Gemm1::SMEM_OFFSET_V];
     
     // Allocate the shared memory tile loader for V. We use the same as K so be careful!!!
-    Smem_tile_v smem_v(smem_v_, tidx);
 
     // Allocate the shared memory tile loader for O. We use the same as K so be careful!!!
     Smem_tile_o smem_o(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
@@ -415,8 +399,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     SmemLayoutK layout_K = SmemLayoutK::packed({ThreadblockShapeQK::kK, ThreadblockShapeQK::kN});
     SmemIteratorK smem_k_cl({reinterpret_cast<Element *>(smem_ + Gemm1::Smem_tile_q::BYTES_PER_TILE), layout_K}, tidx);
     SmemLayoutV layout_V = SmemLayoutV::packed({ThreadblockShapePV::kK, ThreadblockShapePV::kN});
-    SmemIteratorV smem_v_cl({reinterpret_cast<Element *>(smem_v_), layout_V}, tidx);
-    WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_), layout_V}, cutlass::arch::LaneId());
+    // SmemIterator stores to smem and WarpIterator loads from smem
+    SmemIteratorV smem_v_cl({reinterpret_cast<Element *>(smem_v_addr), layout_V}, tidx);
+    WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_addr), layout_V}, cutlass::arch::LaneId());
 
     using Smem_O_cl = fmha::FMHAEpilogue<Cta_tile_o>;
     Smem_O_cl smem_o_cl(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
@@ -512,20 +497,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // Load the fragments for Q.
     gemm_q_k.load_q();
 
-    // // Load the fragments for V. We keep the data in registers during the entire kernel.
-    // typename Smem_tile_v::Fragment frag_v[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_N];
-    // #pragma unroll
-    // for( int ki = 0; ki < Mma_tile_o::MMAS_K; ++ki ) {
-    //     smem_v.load(frag_v[ki], ki);
-    // }
-
-    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-    //     printf("smem_v_ address: %p\n", smem_v_);
-    // }
-    int warp_idx = threadIdx.x / 32;
+    // Load the fragments for V. We keep the data in registers during the entire kernel.
     // copied from mma_pipelined.h
-    // iter_V.add_tile_offset({Mma_tile_o::MMAS_K * warp_idx, 0});
-    // typename WarpIteratorV::Fragment frag_v_cl[Mma_tile_o::MMAS_K];
+    int warp_idx = threadIdx.x / 32;
     iter_V.add_tile_offset({kIterationsPV * warp_idx, 0});
     typename WarpIteratorV::Fragment frag_v_cl[kIterationsPV];
     static_assert(WarpIteratorV::Fragment::kStorageElements == 4 * Mma_tile_o::MMAS_N || WarpIteratorV::Fragment::kStorageElements == 2 * Mma_tile_o::MMAS_N );
@@ -580,7 +554,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         // Trigger the load for the next Q values.
         if( l < steps - 1) {
-            gemm_q_k.smem_q.move_to_next_write_buffer();
             ++gmem_q_cl;
             // if ((l + 1 == steps - 1) && (binfo.actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
             if ((l + 1 == steps - 1) && (actual_seqlen_q % ThreadblockShapeQK::kM != 0)) {
@@ -701,13 +674,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         if (l < steps - 1) { smem_q_cl.store(gmem_frag_q); }
 
         if (Is_dropout && encode_dropout_in_sign_bit) {
-            // #pragma unroll
-            // for( int ki = 0; ki < Mma_tile_o::MMAS_K; ki++ ) {
-            //     #pragma unroll
-            //     for( int mi = 0; mi < Mma_tile_o::MMAS_M; mi++ ) {
-            //         frag_p[ki][mi].template hrelu_<elem_type>();
-            //     }
-            // }
             cutlass::epilogue::thread::ReLu<decltype(frag_p)> relu;
             frag_p = relu(frag_p);
         }
@@ -864,8 +830,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         gemm_q_k.reload_k();
 
-        // Make sure we are reading from the correct buffer.
-        gemm_q_k.smem_q.move_to_next_read_buffer();
         // Trigger the load from shared memory for the next series of Q values.
         if(l < steps - 1) {
             gemm_q_k.reload_q();
