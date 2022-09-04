@@ -715,8 +715,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             // in the first loop, we write the first 256 rows to gmem_o_cl and the last 256 rows to gmem_o_accum_cl.
             if (Is_first && !Is_last) { gmem_o_accum_cl.move(GmemIteratorOAccum::kIterations); }
         } else {
-            #pragma unroll
             if (!Is_first) { gmem_o_accum_cl.move(-GmemIteratorOAccum::kIterations); }
+            #pragma unroll
             for (int iter = 0; iter < GmemIteratorOAccum::kIterations; ++iter) {
                 gmem_o_accum_cl.store(out_cl[iter]);
                 gmem_o_accum_cl.move();

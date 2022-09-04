@@ -244,11 +244,8 @@ struct Softmax_base {
         for( int mi = 0; mi < MMAS_M; mi++ ) {
             #pragma unroll
             for( int ni = 0; ni < MMAS_N; ni++ ) {
-                // uint4 random_uint4 = ph();
-                // uint16_t (&rnd)[8] = reinterpret_cast<uint16_t (&)[8]>(random_uint4);
-                uint16_t tmp[8];
-                fmha::uint4_to_ushort8(ph(), tmp);
-                // fmha::uint4_to_ushort8(ph(), rnd);
+                uint4 random_uint4 = ph();
+                uint16_t (&rnd)[8] = reinterpret_cast<uint16_t (&)[8]>(random_uint4);
                 // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
                 //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, rnd.x, rnd.y, rnd.z, rnd.w);
                 // }
@@ -257,8 +254,7 @@ struct Softmax_base {
                     #pragma unroll
                     for (int jj = 0; jj < 4; ++jj) {
                         elt_[mi * 2 + ii][4 * ni + jj] =
-                            // encode_dropout(rnd[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
-                            encode_dropout(tmp[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
+                            encode_dropout(rnd[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
                     }
                 }
             }
@@ -279,8 +275,6 @@ struct Softmax_base {
             for( int ni = 0; ni < MMAS_N; ni += 2 ) {
                 uint4 random_uint4 = ph0();
                 uint16_t (&rnd0)[8] = reinterpret_cast<uint16_t (&)[8]>(random_uint4);
-                // uint16_t tmp[8];
-                // fmha::uint4_to_ushort8(ph0(), tmp);
                 // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
                 //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, rnd0.x, rnd0.y, rnd0.z, rnd0.w);
                 // }
@@ -290,12 +284,10 @@ struct Softmax_base {
                     for (int jj = 0; jj < 4; ++jj) {
                         elt_[mi * 2 + ii][4 * ni + jj] =
                             encode_dropout(rnd0[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
-                            // encode_dropout(tmp[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
                     }
                 }
                 random_uint4 = ph1();
                 uint16_t (&rnd1)[8] = reinterpret_cast<uint16_t (&)[8]>(random_uint4);
-                // fmha::uint4_to_ushort8(ph1(), tmp);
                 // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
                 //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, rnd1.x, rnd1.y, rnd1.z, rnd1.w);
                 // }
@@ -305,7 +297,6 @@ struct Softmax_base {
                     for (int jj = 0; jj < 4; ++jj) {
                         elt_[mi * 2 + ii][4 * (ni + 1) + jj] =
                             encode_dropout(rnd1[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * (ni + 1) + jj]);
-                            // encode_dropout(tmp[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * (ni + 1) + jj]);
                     }
                 }
             }

@@ -104,14 +104,4 @@ using Cta_tile_extd = Cta_tile_<M, N, K, WARPS_M, WARPS_N, WARPS_K>;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Cta_tile_>
-using Cta_tile_with_k_with_padding = Cta_tile_extd<Cta_tile_::M,
-                                                   Cta_tile_::N,
-                                                   Next_power_of_two<Cta_tile_::K>::VALUE,
-                                                   Cta_tile_::WARPS_M,
-                                                   Cta_tile_::WARPS_N,
-                                                   Cta_tile_::WARPS_K>;
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 }  // namespace fmha
