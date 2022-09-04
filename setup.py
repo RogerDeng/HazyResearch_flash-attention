@@ -119,7 +119,7 @@ ext_modules.append(
         name="flash_attn_cuda_cutlass",
         sources=[
             "csrc/flash_attn/fmha_api.cpp",
-            "csrc/flash_attn/src/fmha_fprop_fp16_kernel.sm80.cu",
+            "csrc/flash_attn/src/fmha_fprop_kernel_dispatch.cu",
         ],
         extra_compile_args={
             "cxx": ["-O3"] + generator_flag,

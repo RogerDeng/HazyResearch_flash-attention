@@ -32,7 +32,7 @@
 #include <fmha/kernel_traits.h>
 #include <fmha/gemm.h>
 #include <fmha/utils.h>
-#include <fmha/smem_cl.h>
+#include <fmha/epilogue.h>
 
 #include "cutlass/cutlass.h"
 #include "cutlass/layout/layout.h"
@@ -57,7 +57,7 @@ namespace fmha {
 
 template<typename Kernel_traits>
 struct Gemm_Q_K_base {
-    using Smem_O_cl = fmha::FMHAEpilogue<typename Kernel_traits::Cta_tile_o>;
+    using Smem_O_cl = fmha::FMHAEpilogue<typename Kernel_traits::MmaCorePV>;
     using WarpMma = typename Kernel_traits::MmaCoreQK::MmaTensorOp;
 
     // The description of the CTA tile for the 1st batched GEMM.
@@ -277,8 +277,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // The global memory tile to load V.
     using GmemIteratorV = typename Kernel_traits::GmemIteratorV;
     // The global memory tile to store O.
-    using GmemIteratorO = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIterator;
-    using GmemIteratorOAccum = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIteratorAccum;
+    using GmemIteratorO = typename fmha::FMHAEpilogue<MmaCorePV>::GmemIterator;
+    using GmemIteratorOAccum = typename fmha::FMHAEpilogue<MmaCorePV>::GmemIteratorAccum;
 
     using Gmem_tile_s = typename Kernel_traits::Gmem_tile_s;
 
@@ -330,7 +330,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_addr), layout_V}, threadIdx.x % 32);
 
     // Allocate the shared memory tile loader for O. We use the same as K so be careful!!!
-    using Smem_O_cl = fmha::FMHAEpilogue<Cta_tile_o>;
+    using Smem_O_cl = fmha::FMHAEpilogue<MmaCorePV>;
     Smem_O_cl smem_o_cl(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
 
     // Allocate the global memory tile loader for Q.
@@ -641,10 +641,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
                 out_cl_reshaped[jj] = multiply_fragments(out_cl_reshaped[jj], p_prev_scale_o[jj]);
             }
         }
-        // FMHAEpilogue::template load</*zero_init=*/Is_first>(
-        //     reinterpret_cast<typename FMHAEpilogue::OutputFragment (&)[FMHAEpilogue::kFragmentsPerIteration]>(out),
-        //     &smem_[Gemm1::SMEM_OFFSET_O], tidx, l);
-        smem_o_cl.template load</*zero_init=*/Is_first>(out_cl, tidx, l);
+        smem_o_cl.template load</*zero_init=*/Is_first>(out_cl, tidx);
 
         const bool is_final_write =
             Is_last
@@ -731,4 +728,3 @@ inline __device__ void device_1xN_loop(const Params &params) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 } // namespace fmha
-

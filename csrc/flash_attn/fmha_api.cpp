@@ -55,9 +55,6 @@ void set_params_fprop(FMHA_fprop_params &params,
                       float softmax_scale,
                       bool is_causal) {
 
-    Data_type acc_type = DATA_TYPE_FP32;
-    Data_type data_type = !(q.dtype() == torch::kBFloat16) ? DATA_TYPE_FP16 : DATA_TYPE_BF16;
-
     // Reset the parameters
     memset(&params, 0, sizeof(params));
 
@@ -83,7 +80,7 @@ void set_params_fprop(FMHA_fprop_params &params,
 
     // S = softmax(P)
     params.s_ptr = s_d;
-    params.s_stride_in_bytes = get_size_in_bytes(b * h * seqlen_k, data_type);
+    params.s_stride_in_bytes = b * h * seqlen_k * 2;  // 2 = sizeof(Element)
 
     // Softmax sum
     params.softmax_lse_ptr = softmax_lse_d;
@@ -162,7 +159,6 @@ mha_fwd(const at::Tensor &q,         // total_q x num_heads x head_size, total_q
     const int head_size = sizes[D_DIM];
     const int total_k = k.size(TOTAL_DIM);
     TORCH_CHECK(batch_size > 0);
-    // TORCH_CHECK(head_size == 16 || head_size == 32 || head_size == 64 || head_size == 128);
     TORCH_CHECK((head_size % 8 == 0) && (head_size <= 128));
     const int head_size_rounded = head_size <= 64 ? 64 : 128;
 

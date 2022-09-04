@@ -31,8 +31,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <cuda_runtime_api.h>
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -50,28 +48,3 @@
     } while( 0 )
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
-enum Data_type { DATA_TYPE_FP16, DATA_TYPE_BF16, DATA_TYPE_FP32, DATA_TYPE_INT32, DATA_TYPE_INT8 };
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-static inline size_t get_size_in_bytes( size_t n, Data_type dtype ) {
-    switch( dtype ) {
-    case DATA_TYPE_FP32:
-        return n * 4;
-    case DATA_TYPE_FP16:
-        return n * 2;
-    case DATA_TYPE_BF16:
-        return n * 2;
-    case DATA_TYPE_INT32:
-        return n * 4;
-    case DATA_TYPE_INT8:
-        return n;
-    default:
-        assert( false );
-        return 0;
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
