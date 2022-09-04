@@ -31,6 +31,13 @@
 
 #include "cutlass/gemm/gemm.h"
 
+#include "cutlass/cutlass.h"
+#include "cutlass/layout/layout.h"
+#include <cutlass/numeric_types.h>
+#include "cutlass/transform/threadblock/predicated_tile_iterator.h"
+
+#include <fmha/mma_core_sm75.h>
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<int S, int D, int STEP, int WARPS_M, int WARPS_N, uint32_t FLAGS = 0x08u, typename elem_type_=__half>
@@ -73,16 +80,12 @@ struct FMHA_kernel_traits {
     // The global memory tile to load/store S.
     using Gmem_tile_s = fmha::Gmem_tile_mma_s<Cta_tile_p>;
 
-    // The shared memory tile to transpose S.
-    using Smem_tile_st = fmha::Smem_tile_mma_transposed<Cta_tile_p>;
-
-    using Gmem_tile_do = fmha::Gmem_tile_qkv<Cta_tile_p, fmha::BITS_PER_ELEMENT_A, STEP, D>;
-
     // The global memory tile to store the softmax sum.
     using Gmem_softmax_sum = fmha::Gmem_summary_stats<Cta_tile_p>;
 
-    // The shared memory tile to store dp sum.
-    using Smem_dp_sum = fmha::Smem_tile_dp_sum<Gmem_tile_q, 2>;
+    // The shared memory tile to store softmax lse.
+    // using Smem_softmax_lse = fmha::Smem_tile_dp_sum<Gmem_tile_q, 2>;
+    using Smem_softmax_lse = fmha::Smem_tile_softmax_lse<Gmem_tile_q>;
 
     using elem_type = elem_type_;
 
@@ -117,6 +120,62 @@ struct FMHA_kernel_traits {
     using MmaInstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
     // TD [2022-06-02] We don't support Volta (SM70) yet.
 #endif
+
+    using Element = cutlass::half_t;
+    using ElementAccum = float;
+
+    static_assert(WARPS_M == 1);
+    using ThreadblockShapeQK = cutlass::gemm::GemmShape<STEP, S, D>;
+    using WarpCountQK = cutlass::gemm::GemmShape<WARPS_M, WARPS_N, 1>;
+    using WarpShapeQK = cutlass::gemm::GemmShape<
+       ThreadblockShapeQK::kM,
+       ThreadblockShapeQK::kN / WarpCountQK::kN, ThreadblockShapeQK::kK>;
+    using LayoutQ = cutlass::layout::RowMajor;
+    using LayoutK = cutlass::layout::ColumnMajor;
+    using LayoutP = cutlass::layout::RowMajor;
+    using MmaCoreQK = typename fmha::FMHAMmaCore<
+        ThreadblockShapeQK, WarpShapeQK, MmaInstructionShape, Element, LayoutQ,
+        Element, LayoutK, ElementAccum, LayoutP,
+        cutlass::arch::OpClassTensorOp>;
+
+    using ThreadblockShapePV = cutlass::gemm::GemmShape<STEP, D, S>;
+    using WarpCountPV = cutlass::gemm::GemmShape<WARPS_M, 1, WARPS_N>;
+    using WarpShapePV = cutlass::gemm::GemmShape<ThreadblockShapePV::kM, ThreadblockShapePV::kN, ThreadblockShapePV::kK / WarpCountPV::kK>;
+    using LayoutV = cutlass::layout::RowMajor;
+    using LayoutO = cutlass::layout::RowMajor;
+    using MmaCorePV = typename fmha::FMHAMmaCore<
+        ThreadblockShapePV, WarpShapePV, MmaInstructionShape, Element, LayoutP,
+        Element, LayoutV, ElementAccum, LayoutO,
+        cutlass::arch::OpClassTensorOp>;
+
+    // The global memory tile to load Q.
+    // Copy from mma_piplined_testbed.h
+    using GmemIteratorQ = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapeQK::kM, ThreadblockShapeQK::kK>,
+      Element,
+      LayoutQ,
+      0,
+      typename MmaCoreQK::IteratorThreadMapA
+    >;
+
+    // The global memory tile to load K.
+    using GmemIteratorK = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapeQK::kK, ThreadblockShapeQK::kN>,
+      Element,
+      LayoutK,
+      1,
+      typename MmaCoreQK::IteratorThreadMapB
+    >;
+
+    // The global memory tile to load V.
+    using GmemIteratorV = cutlass::transform::threadblock::PredicatedTileIterator<
+      cutlass::MatrixShape<ThreadblockShapePV::kK, ThreadblockShapePV::kN>,
+      Element,
+      LayoutV,
+      0,
+      typename MmaCorePV::IteratorThreadMapB
+    >;
+
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

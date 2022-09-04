@@ -131,7 +131,7 @@ struct FMHAMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
     Shape::kK / WarpShape::kK
   >;
 
-  // Divisility requirements
+  // Divisibility requirements
   static_assert(
     !(Shape::kM % WarpShape::kM) &&
     !(Shape::kN % WarpShape::kN),
@@ -161,7 +161,7 @@ struct FMHAMmaCore<Shape_, WarpShape_, InstructionShape_, ElementA_,
       kWarpSize / kWarpThreadArrangementContiguousA;
 
   static int const kWarpThreadArrangementContiguousB =
-      kCrosswise / (kAccessSizeInBits / cutlass::sizeof_bits<ElementA>::value);
+      kCrosswise / (kAccessSizeInBits / cutlass::sizeof_bits<ElementB>::value);
 
   static int const kWarpThreadArrangementStridedB =
       kWarpSize / kWarpThreadArrangementContiguousB;

@@ -47,7 +47,6 @@
 #include "cutlass/gemm/threadblock/default_mma_core.h"
 #include "cutlass/gemm/threadblock/default_mma_core_sm75.h"
 #include "cutlass/gemm/threadblock/default_mma_core_sm80.h"
-#include "cutlass/transform/threadblock/predicated_tile_iterator.h"
 #include "cutlass/epilogue/warp/fragment_iterator_tensor_op.h"
 #include "cutlass/epilogue/warp/tile_iterator_tensor_op.h"
 #include "cutlass/epilogue/threadblock/default_thread_map_tensor_op.h"
@@ -58,19 +57,20 @@ namespace fmha {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, typename WarpMma>
+template<typename Kernel_traits>
 struct Gemm_Q_K_base {
     using Smem_tile_o = typename Kernel_traits::Smem_tile_o;
     using Smem_tile_q = typename Kernel_traits::Smem_tile_q;
     using Smem_tile_k = typename Kernel_traits::Smem_tile_k;
     using Smem_O_cl = fmha::FMHAEpilogue<typename Kernel_traits::Cta_tile_o>;
+    using WarpMma = typename Kernel_traits::MmaCoreQK::MmaTensorOp;
 
     // The description of the CTA tile for the 1st batched GEMM.
     using Cta_tile_p = typename Kernel_traits::Cta_tile_p;
 
     static constexpr int SMEM_BYTES_SOFTMAX = Cta_tile_p::M * Cta_tile_p::WARPS_N * sizeof(float) * 2;
 
-    __device__ inline Gemm_Q_K_base(char * smem_ptr_q, char * smem_ptr_k, const int tidx) 
+    __device__ inline Gemm_Q_K_base(char * smem_ptr_q, char * smem_ptr_k)
         : smem_q_ptr(smem_ptr_q)
         , smem_k_ptr(smem_ptr_k) {
 
@@ -94,15 +94,16 @@ struct Gemm_Q_K_base {
     char *smem_k_ptr;
 };
 
-template<typename Kernel_traits, typename WarpMma, bool K_in_regs>
-struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
+template<typename Kernel_traits, bool K_in_regs>
+struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
 
-    using Base = Gemm_Q_K_base<Kernel_traits, WarpMma>;
+    using Base = Gemm_Q_K_base<Kernel_traits>;
     using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
     using Cta_tile_p = typename Base::Cta_tile_p;
     using Smem_O_cl = typename Base::Smem_O_cl;
+    using WarpMma = typename Base::WarpMma;
 
     static constexpr int kIterations = WarpMma::Shape::kK / WarpMma::InstructionShape::kK;
 
@@ -122,8 +123,8 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
                                                // Smem_tile_o::BYTES_PER_TILE + Base::SMEM_BYTES_SOFTMAX);
                                                (int)sizeof(typename Smem_O_cl::SharedStorage) + Base::SMEM_BYTES_SOFTMAX);
 
-    __device__ inline Gemm_Q_K(char * smem_, const int tidx) 
-        : Base(smem_, smem_ + Smem_tile_q::BYTES_PER_TILE, tidx) {
+    __device__ inline Gemm_Q_K(char * smem_)
+        : Base(smem_, smem_ + Smem_tile_q::BYTES_PER_TILE) {
     }
 
     __device__ inline void load_k(){
@@ -160,15 +161,16 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
 };
 
 
-template<typename Kernel_traits, typename WarpMma>
-struct Gemm_Q_K<Kernel_traits, WarpMma, false> : public Gemm_Q_K_base<Kernel_traits, WarpMma> {
-    using Base = Gemm_Q_K_base<Kernel_traits, WarpMma>;
+template<typename Kernel_traits>
+struct Gemm_Q_K<Kernel_traits, false> : public Gemm_Q_K_base<Kernel_traits> {
+    using Base = Gemm_Q_K_base<Kernel_traits>;
     using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
     using Smem_tile_v = typename Kernel_traits::Smem_tile_v;
     using Cta_tile_p = typename Base::Cta_tile_p;
     using Smem_O_cl = typename Base::Smem_O_cl;
+    using WarpMma = typename Base::WarpMma;
 
     static constexpr bool SHARE_SMEM_FOR_K_AND_V = Kernel_traits::SHARE_SMEM_FOR_K_AND_V;
     static constexpr bool V_IN_REGS = Kernel_traits::V_IN_REGS;
@@ -187,8 +189,8 @@ struct Gemm_Q_K<Kernel_traits, WarpMma, false> : public Gemm_Q_K_base<Kernel_tra
                                     // + Smem_tile_o::BYTES_PER_TILE + Base::SMEM_BYTES_SOFTMAX;
                                     + (int)sizeof(typename Smem_O_cl::SharedStorage) + Base::SMEM_BYTES_SOFTMAX;
 
-    __device__ inline Gemm_Q_K(char * smem_, const int tidx) 
-      : Base(smem_, smem_ + Smem_tile_q::BYTES_PER_TILE, tidx) {
+    __device__ inline Gemm_Q_K(char * smem_)
+      : Base(smem_, smem_ + Smem_tile_q::BYTES_PER_TILE) {
     }
 
     __device__ inline void load_k(){
@@ -235,26 +237,7 @@ struct Gemm_Q_K<Kernel_traits, WarpMma, false> : public Gemm_Q_K_base<Kernel_tra
 
 template<typename Kernel_traits>
 constexpr size_t get_dynamic_smem_size(){
-    using Cta_tile_p = typename Kernel_traits::Cta_tile_p;
-    using Mma_tile_p = fmha::Hmma_tile<Cta_tile_p>;
-
-    using InstructionShape = typename Kernel_traits::MmaInstructionShape;
-    using Element = cutlass::half_t;
-    using ElementAccum = float;
-
-    using ThreadblockShapeQK = cutlass::gemm::GemmShape<Cta_tile_p::M, Cta_tile_p::N, Cta_tile_p::K>;
-    using WarpShapeQK = cutlass::gemm::GemmShape<Cta_tile_p::M, 16 * Mma_tile_p::MMAS_N, Cta_tile_p::K>;
-    using LayoutP = cutlass::layout::RowMajor;
-    // Cutlass's Crosswise only supports at most 64
-    constexpr int kCrosswise = std::min(ThreadblockShapeQK::kK, 64);
-    using SmemLayoutQ = cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<
-        cutlass::sizeof_bits<Element>::value, kCrosswise>;
-    using SmemLayoutK = cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<
-        cutlass::sizeof_bits<Element>::value, kCrosswise>;
-    using WarpMmaQK = typename cutlass::gemm::warp::DefaultMmaTensorOp<
-        WarpShapeQK, InstructionShape, Element, SmemLayoutQ, Element, SmemLayoutK, ElementAccum,
-        LayoutP, cutlass::arch::OpMultiplyAdd, 1, true>::Type;
-    return Gemm_Q_K<Kernel_traits, WarpMmaQK, Kernel_traits::K_IN_REGS>::SMEM_BYTES;
+    return Gemm_Q_K<Kernel_traits, Kernel_traits::K_IN_REGS>::SMEM_BYTES;
 }
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Return_softmax, bool Is_first, bool Is_last, typename Params, typename Prng>
@@ -282,29 +265,21 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     using Element = cutlass::half_t;
     using ElementAccum = float;
 
-    using ThreadblockShapeQK = cutlass::gemm::GemmShape<Cta_tile_p::M, Cta_tile_p::N, Cta_tile_p::K>;
-    using WarpShapeQK = cutlass::gemm::GemmShape<Cta_tile_p::M, ThreadblockShapeQK::kN / Cta_tile_p::WARPS_N, Cta_tile_p::K>;
-    using LayoutQ = cutlass::layout::RowMajor;
-    using LayoutK = cutlass::layout::ColumnMajor;
-    using LayoutP = cutlass::layout::RowMajor;
-    using MmaCoreQK = typename fmha::FMHAMmaCore<
-        ThreadblockShapeQK, WarpShapeQK, InstructionShape, Element, LayoutQ,
-        Element, LayoutK, ElementAccum, LayoutP,
-        cutlass::arch::OpClassTensorOp>;
+    using ThreadblockShapeQK = typename Kernel_traits::ThreadblockShapeQK;
+    using LayoutQ = typename Kernel_traits::LayoutQ;
+    using LayoutK = typename Kernel_traits::LayoutK;
+    using LayoutP = typename Kernel_traits::LayoutP;
+    using MmaCoreQK = typename Kernel_traits::MmaCoreQK;
     using WarpMmaQK = typename MmaCoreQK::MmaTensorOp;
     using SmemLayoutQ = typename MmaCoreQK::SmemLayoutA;
     using SmemLayoutK = typename MmaCoreQK::SmemLayoutB;
     using SmemIteratorQ = typename MmaCoreQK::SmemIteratorA;
     using SmemIteratorK = typename MmaCoreQK::SmemIteratorB;
 
-    using ThreadblockShapePV = cutlass::gemm::GemmShape<Cta_tile_o::M, Cta_tile_o::N, Cta_tile_o::K>;
-    using WarpShapePV = cutlass::gemm::GemmShape<Cta_tile_o::M, Cta_tile_o::N, ThreadblockShapePV::kK / Cta_tile_o::WARPS_K>;
-    using LayoutV = cutlass::layout::RowMajor;
-    using LayoutO = cutlass::layout::RowMajor;
-    using MmaCorePV = typename fmha::FMHAMmaCore<
-        ThreadblockShapePV, WarpShapePV, InstructionShape, Element, LayoutP,
-        Element, LayoutV, ElementAccum, LayoutO,
-        cutlass::arch::OpClassTensorOp>;
+    using ThreadblockShapePV = typename Kernel_traits::ThreadblockShapePV;
+    using LayoutV = typename Kernel_traits::LayoutV;
+    using LayoutO = typename Kernel_traits::LayoutO;
+    using MmaCorePV = typename Kernel_traits::MmaCorePV;
     using WarpMmaPV = typename MmaCorePV::MmaTensorOp;
     using WarpIteratorV = typename WarpMmaPV::IteratorB;
     using SmemLayoutV = typename MmaCorePV::SmemLayoutB;
@@ -313,32 +288,11 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
     // The global memory tile to load Q.
     // Copy from mma_piplined_testbed.h
-    using GmemIteratorQ = cutlass::transform::threadblock::PredicatedTileIterator<
-      cutlass::MatrixShape<ThreadblockShapeQK::kM, ThreadblockShapeQK::kK>,
-      Element,
-      LayoutQ,
-      0,
-      typename MmaCoreQK::IteratorThreadMapA
-    >;
-
+    using GmemIteratorQ = typename Kernel_traits::GmemIteratorQ;
     // The global memory tile to load K.
-    using GmemIteratorK = cutlass::transform::threadblock::PredicatedTileIterator<
-      cutlass::MatrixShape<ThreadblockShapeQK::kK, ThreadblockShapeQK::kN>,
-      Element,
-      LayoutK,
-      1,
-      typename MmaCoreQK::IteratorThreadMapB
-    >;
-
+    using GmemIteratorK = typename Kernel_traits::GmemIteratorK;
     // The global memory tile to load V.
-    using GmemIteratorV = cutlass::transform::threadblock::PredicatedTileIterator<
-      cutlass::MatrixShape<ThreadblockShapePV::kK, ThreadblockShapePV::kN>,
-      Element,
-      LayoutV,
-      0,
-      typename MmaCorePV::IteratorThreadMapB
-    >;
-
+    using GmemIteratorV = typename Kernel_traits::GmemIteratorV;
     // The global memory tile to store O.
     using GmemIteratorO = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIterator;
     using GmemIteratorOAccum = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIteratorAccum;
@@ -351,9 +305,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
     using Gmem_softmax_sum = typename Kernel_traits::Gmem_softmax_sum;
 
-    using Smem_softmax_sum = typename Kernel_traits::Smem_dp_sum;
+    using Smem_softmax_lse = typename Kernel_traits::Smem_softmax_lse;
 
-    using Gemm1 = Gemm_Q_K<Kernel_traits, WarpMmaQK, Kernel_traits::K_IN_REGS>;
+    using Gemm1 = Gemm_Q_K<Kernel_traits, Kernel_traits::K_IN_REGS>;
 
     using Softmax = fmha::Softmax<Cta_tile_p, Kernel_traits>;
 
@@ -367,7 +321,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // if( binfo.stop_early() ) return;
     if( binfo.stop_early(loop_step_idx * Cta_tile_p::N) ) return;
 
-    Gemm1 gemm_q_k(smem_, tidx);
+    Gemm1 gemm_q_k(smem_);
     // Allocate the global memory tile loader for S.
     Gmem_tile_s gmem_s(params, binfo, tidx);
     Gmem_softmax_sum gmem_softmax_lse(params.softmax_lse_ptr, params, tidx);
@@ -527,7 +481,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // Create the object to do the softmax.
     Softmax softmax(params, &smem_[Gemm1::SMEM_OFFSET_SOFTMAX], tidx);
 
-    Smem_softmax_sum smem_softmax_lse(reinterpret_cast<float *>(&smem_[Gemm1::SMEM_BYTES]), tidx);
+    Smem_softmax_lse smem_softmax_lse(reinterpret_cast<float *>(&smem_[Gemm1::SMEM_BYTES]));
 
     // Load over the entire sequence length.
     for( int l = 0; l < steps; l++ ) {
@@ -589,7 +543,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Compute the max.
         float p_max[Mma_tile_p::MMAS_M * 2];
         if (!Is_first) {
-            smem_softmax_lse.store_pair(p_prev_lse, l % 2);
+            // TODO: Not all thread should write to smem
+            smem_softmax_lse.store_pair(p_prev_lse);
             // for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi]; }
             for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi] / params.scale_bmm1; }
         }
@@ -728,7 +683,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         }
         float p_prev_scale_o[Gmem_tile_o::STGS_PER_LOOP];
         if ((!Is_first) && o_rows_are_valid) {
-            smem_softmax_lse.load(p_prev_scale_o, rows, l % 2);
+            smem_softmax_lse.load(p_prev_scale_o, rows);
         }
         // if (!Is_first) {
         //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
@@ -766,6 +721,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             //         printf("p_sum_log=%.6f\n", p_sum_log[jj][0]);
             //     }
             // }
+            // TODO: not sure if checking output_thread_start_column == 0 is right.
             if ((output_thread_start_column == 0) && o_rows_are_valid) {
                 // if ((blockIdx.x == 0) && (blockIdx.y == 0)) {
                 //     printf("thread %d storing lse, jj = %d, rows[jj] = %d, p_sum_log[jj] = %f\n", tidx, jj, rows[jj], p_sum_log[jj][0]);
@@ -795,8 +751,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             Is_last
             || ((loop_step_idx + 1) * Cta_tile_p::N >= binfo.actual_seqlen_k)
             || ((Is_causal) && ((begin + l) * Cta_tile_p::M < (loop_step_idx + 1) * Cta_tile_p::N));
-        #pragma unroll
         auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kRowsPerThread]>(out_cl);
+        #pragma unroll
         for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
             float sum = p_sum_o[jj][0];
             float inv_sum = (sum == 0.f || sum != sum) ? 1.f : 1.f / sum;

@@ -31,6 +31,8 @@
 #include <fmha/utils.h>
 #include <fmha/gemm.h>
 
+#include <cutlass/arch/mma.h>
+
 namespace fmha {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1574,101 +1576,34 @@ struct Smem_tile_transpose {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<
-    typename Gmem_tile,
-    // The number of buffers. (Used in multistage and double buffer cases.)
-    int BUFFERS_PER_TILE_ = 1
->
-struct Smem_tile_dp_sum {
+template<typename Gmem_tile>
+struct Smem_tile_softmax_lse {
 
     using Cta_tile = typename Gmem_tile::Cta_tile;
     using Mma_tile = fmha::Hmma_tile<Cta_tile>;
 
     // The size of each element.
-    static constexpr int BYTES_PER_ELEMENT = 4;
+    static constexpr int BYTES_PER_ELEMENT = sizeof(float);
     static constexpr int ROWS = Gmem_tile::ROWS;
     static constexpr int THREADS_PER_ROW = Gmem_tile::THREADS_PER_ROW;
     static constexpr int MMAS_M = Mma_tile::MMAS_M;
 
-    static constexpr int ROWS_PER_LDG = Gmem_tile::ROWS_PER_LDG;
-    static constexpr int LDGS = Gmem_tile::LDGS;
-
     static constexpr int ROWS_PER_MMA = Mma_tile::M_PER_MMA;
 
     // The size of one buffer in bytes in shared memory.
-    static constexpr int BYTES_PER_BUFFER = ROWS * BYTES_PER_ELEMENT;
-    // The number of buffers.
-    static constexpr int BUFFERS_PER_TILE = BUFFERS_PER_TILE_;
-    // The size in bytes of total buffers.
-    static constexpr int BYTES_PER_TILE = BYTES_PER_BUFFER * BUFFERS_PER_TILE;
-    // The boundary for smem_read_offset and smem_write_offset increment.
-    static constexpr int ROWS_PER_TILE_INC_BOUNDARY = ROWS * BUFFERS_PER_TILE - ROWS;
+    static constexpr int BYTES_PER_TILE = ROWS * BYTES_PER_ELEMENT;
 
-    inline __device__ Smem_tile_dp_sum(float *smem, const int tidx)
-        : smem_(smem), smem_read_buffer_(smem), smem_write_buffer_(smem), tidx_(tidx) {
+    inline __device__ Smem_tile_softmax_lse(float *smem) : smem_(smem) {
     }
 
-    // Move the read offset to next buffer.
-    inline __device__ void move_to_next_read_buffer() {
-        if( BUFFERS_PER_TILE > 1 && (smem_read_buffer_ - smem_) >= ROWS_PER_TILE_INC_BOUNDARY ) {
-            this->smem_read_buffer_ -= ROWS_PER_TILE_INC_BOUNDARY;
-        } else if( BUFFERS_PER_TILE > 1 ) {
-            this->smem_read_buffer_ += ROWS;
-        }
-    }
-
-    // Move the write offset to next buffer.
-    inline __device__ void move_to_next_write_buffer() {
-        if( BUFFERS_PER_TILE > 1 && (smem_write_buffer_ - smem_) >= ROWS_PER_TILE_INC_BOUNDARY ) {
-            this->smem_write_buffer_ -= ROWS_PER_TILE_INC_BOUNDARY;
-        } else if( BUFFERS_PER_TILE > 1 ) {
-            this->smem_write_buffer_ += ROWS;
-        }
-    }
-
-    inline __device__ void store(const float (&sum)[LDGS]) {
-        if (tidx_ % THREADS_PER_ROW == 0) {
-            int row = tidx_ / THREADS_PER_ROW;
-            #pragma unroll
-            for (int i = 0; i < LDGS; ++i) {
-                if (row + i * ROWS_PER_LDG < ROWS) {
-                    smem_write_buffer_[row + i * ROWS_PER_LDG] = sum[i];
-                }
-            }
-        }
-    }
-
-    inline __device__ void store(const float sum, const int buffer_idx) {
-        float *smem_write = smem_ + buffer_idx * ROWS;
-        int row = tidx_ / THREADS_PER_ROW;
-        if ((row < ROWS) && (tidx_ % THREADS_PER_ROW == 0)) {
-            smem_write[row] = sum;
-        }
-    }
-
-    inline __device__ void store(const float (&sum)[LDGS], const int buffer_idx) {
-        float *smem_write = smem_ + buffer_idx * ROWS;
-        if (tidx_ % THREADS_PER_ROW == 0) {
-            int row = tidx_ / THREADS_PER_ROW;
-            #pragma unroll
-            for (int i = 0; i < LDGS; ++i) {
-                if (row + i * ROWS_PER_LDG < ROWS) {
-                    smem_write[row + i * ROWS_PER_LDG] = sum[i];
-                }
-            }
-        }
-    }
-
-    inline __device__ void store_pair(const float (&sum)[MMAS_M * 2], const int buffer_idx) {
-        float *smem_write = smem_ + buffer_idx * ROWS;
+    inline __device__ void store_pair(const float (&sum)[MMAS_M * 2]) {
         // Extract the position in the warp.
-        int warp = tidx_ / Cta_tile::THREADS_PER_WARP;
-        int lane = tidx_ % Cta_tile::THREADS_PER_WARP;
+        int lane = cutlass::arch::LaneId();
         int row = lane / 4;
         #pragma unroll
         for (int mi = 0; mi < MMAS_M; ++mi) {
-            smem_write[mi * ROWS_PER_MMA + row + 0] = sum[mi * 2 + 0];
-            smem_write[mi * ROWS_PER_MMA + row + 8] = sum[mi * 2 + 1];
+            smem_[mi * ROWS_PER_MMA + row + 0] = sum[mi * 2 + 0];
+            smem_[mi * ROWS_PER_MMA + row + 8] = sum[mi * 2 + 1];
         }
     }
 
@@ -1676,28 +1611,11 @@ struct Smem_tile_dp_sum {
     inline __device__ void load(float (&sum)[N], const int (&row)[N]) {
         #pragma unroll
         for( int ni = 0; ni < N; ni++ ) {
-            sum[ni] = smem_read_buffer_[row[ni]];
+            sum[ni] = smem_[row[ni]];
         }
     }
 
-    template<int N>
-    inline __device__ void load(float (&sum)[N], const int (&row)[N], const int buffer_idx) {
-        float *smem_read = smem_ + buffer_idx * ROWS;
-        #pragma unroll
-        for( int ni = 0; ni < N; ni++ ) {
-            sum[ni] = smem_read[row[ni]];
-        }
-    }
-
-    static inline __device__ float reduce_warp(float sum) {
-        fmha::SumOp<float> sum_op;
-        return fmha::Allreduce<THREADS_PER_ROW>::run(sum, sum_op);
-    }
-
-    const int tidx_;
     float * const smem_;
-    float *smem_read_buffer_;
-    float *smem_write_buffer_;
 };
 
 }  // namespace fmha
