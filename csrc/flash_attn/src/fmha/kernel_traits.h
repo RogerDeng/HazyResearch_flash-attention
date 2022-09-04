@@ -72,8 +72,6 @@ struct FMHA_kernel_traits {
 
     // The global memory tile to store O.
     using Gmem_tile_o = fmha::Gmem_tile_o<Cta_tile_o>;
-    // The shared memory tile for O.
-    using Smem_tile_o = fmha::Smem_tile_o<Cta_tile_o>;;
 
     // The global memory tile to load/store S.
     using Gmem_tile_s = fmha::Gmem_tile_mma_s<Cta_tile_p>;
@@ -84,7 +82,7 @@ struct FMHA_kernel_traits {
     using elem_type = elem_type_;
 
     // Make sure the number of threads match.
-    static_assert((int)Gmem_tile_o::THREADS_PER_ROW == (int)Smem_tile_o::THREADS_PER_ROW, "");
+    // static_assert((int)Gmem_tile_o::THREADS_PER_ROW == (int)Smem_tile_o::THREADS_PER_ROW, "");
 
     // The number of threads.
     static constexpr int THREADS = Cta_tile_p::THREADS_PER_CTA;
@@ -98,12 +96,12 @@ struct FMHA_kernel_traits {
     // The amount of shared memory needed for Q, K and V..
     static constexpr int BYTES_PER_SMEM_QKV = BYTES_PER_SMEM_QK + BYTES_PER_SMEM_V;
     // The amount of shared memory needed to load Q and store O.
-    static constexpr int BYTES_PER_SMEM_QO = Smem_tile_q::BYTES_PER_TILE + Smem_tile_o::BYTES_PER_TILE;
+    // static constexpr int BYTES_PER_SMEM_QO = Smem_tile_q::BYTES_PER_TILE + Smem_tile_o::BYTES_PER_TILE;
 
     // The amount of shared memory needed for Q, K, V and O.
-    static constexpr int BYTES_PER_SMEM = fmha::MaxConstexpr(BYTES_PER_SMEM_QKV, BYTES_PER_SMEM_QO);
+    // static constexpr int BYTES_PER_SMEM = fmha::MaxConstexpr(BYTES_PER_SMEM_QKV, BYTES_PER_SMEM_QO);
     // Make sure we have enough shared memory.
-    static_assert(Smem_tile_q::BYTES_PER_TILE + Smem_tile_o::BYTES_PER_TILE <= BYTES_PER_SMEM, "");
+    // static_assert(Smem_tile_q::BYTES_PER_TILE + Smem_tile_o::BYTES_PER_TILE <= BYTES_PER_SMEM, "");
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     using MmaInstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;

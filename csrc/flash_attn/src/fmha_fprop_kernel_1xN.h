@@ -59,7 +59,6 @@ namespace fmha {
 
 template<typename Kernel_traits>
 struct Gemm_Q_K_base {
-    using Smem_tile_o = typename Kernel_traits::Smem_tile_o;
     using Smem_tile_q = typename Kernel_traits::Smem_tile_q;
     using Smem_tile_k = typename Kernel_traits::Smem_tile_k;
     using Smem_O_cl = fmha::FMHAEpilogue<typename Kernel_traits::Cta_tile_o>;
@@ -98,7 +97,6 @@ template<typename Kernel_traits, bool K_in_regs>
 struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
 
     using Base = Gemm_Q_K_base<Kernel_traits>;
-    using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
     using Cta_tile_p = typename Base::Cta_tile_p;
@@ -112,7 +110,6 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
     static_assert(Kernel_traits::V_IN_REGS);
 
     static constexpr int SMEM_OFFSET_O = Smem_tile_q::BYTES_PER_TILE;
-    // static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + Smem_tile_o::BYTES_PER_TILE;
     static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + sizeof(typename Smem_O_cl::SharedStorage);
     static constexpr int SMEM_OFFSET_V = Smem_tile_q::BYTES_PER_TILE + (SHARE_SMEM_FOR_K_AND_V ? 0 : Smem_tile_k::BYTES_PER_TILE);
 
@@ -120,7 +117,6 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
     //   | O | SOFTMAX
     static constexpr int SMEM_BYTES = Smem_tile_q::BYTES_PER_TILE 
                                     + std::max((SHARE_SMEM_FOR_K_AND_V ? 1 : 2) * Smem_tile_k::BYTES_PER_TILE,
-                                               // Smem_tile_o::BYTES_PER_TILE + Base::SMEM_BYTES_SOFTMAX);
                                                (int)sizeof(typename Smem_O_cl::SharedStorage) + Base::SMEM_BYTES_SOFTMAX);
 
     __device__ inline Gemm_Q_K(char * smem_)
@@ -164,7 +160,6 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
 template<typename Kernel_traits>
 struct Gemm_Q_K<Kernel_traits, false> : public Gemm_Q_K_base<Kernel_traits> {
     using Base = Gemm_Q_K_base<Kernel_traits>;
-    using Smem_tile_o = typename Base::Smem_tile_o;
     using Smem_tile_q = typename Base::Smem_tile_q;
     using Smem_tile_k = typename Base::Smem_tile_k;
     using Smem_tile_v = typename Kernel_traits::Smem_tile_v;
@@ -179,14 +174,12 @@ struct Gemm_Q_K<Kernel_traits, false> : public Gemm_Q_K_base<Kernel_traits> {
     static constexpr int SMEM_OFFSET_V = Smem_tile_q::BYTES_PER_TILE + (SHARE_SMEM_FOR_K_AND_V ? 0 : Smem_tile_k::BYTES_PER_TILE);
     static_assert(Smem_tile_v::BYTES_PER_TILE == (int) Smem_tile_k::BYTES_PER_TILE);
     static constexpr int SMEM_OFFSET_O = SMEM_OFFSET_V + Smem_tile_v::BYTES_PER_TILE;
-    // static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + Smem_tile_o::BYTES_PER_TILE;
     static constexpr int SMEM_OFFSET_SOFTMAX = SMEM_OFFSET_O + sizeof(typename Smem_O_cl::SharedStorage);
 
     // If V_IN_REGS and SHARE_SMEM_FOR_K_AND_V:      Q | K/V | O | SOFTMAX
     // If !V_IN_REGS (then !SHARE_SMEM_FOR_K_AND_V): Q | K   | V | O | SOFTMAX
     static constexpr int SMEM_BYTES = Smem_tile_q::BYTES_PER_TILE
                                     + (SHARE_SMEM_FOR_K_AND_V ? 1 : 2) * Smem_tile_k::BYTES_PER_TILE 
-                                    // + Smem_tile_o::BYTES_PER_TILE + Base::SMEM_BYTES_SOFTMAX;
                                     + (int)sizeof(typename Smem_O_cl::SharedStorage) + Base::SMEM_BYTES_SOFTMAX;
 
     __device__ inline Gemm_Q_K(char * smem_)
@@ -299,7 +292,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
     using Gmem_tile_o = typename Kernel_traits::Gmem_tile_o;
     // The shared memory tile to swizzle O.
-    using Smem_tile_o = typename Kernel_traits::Smem_tile_o;
 
     using Gmem_tile_s = typename Kernel_traits::Gmem_tile_s;
 
@@ -345,9 +337,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     
     // Allocate the shared memory tile loader for V. We use the same as K so be careful!!!
 
-    // Allocate the shared memory tile loader for O. We use the same as K so be careful!!!
-    Smem_tile_o smem_o(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
-
     SmemLayoutQ layout_Q = SmemLayoutQ::packed({ThreadblockShapeQK::kM, ThreadblockShapeQK::kK});
     SmemIteratorQ smem_q_cl({reinterpret_cast<Element *>(smem_), layout_Q}, tidx);
     SmemLayoutK layout_K = SmemLayoutK::packed({ThreadblockShapeQK::kK, ThreadblockShapeQK::kN});
@@ -357,11 +346,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     SmemIteratorV smem_v_cl({reinterpret_cast<Element *>(smem_v_addr), layout_V}, tidx);
     WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_addr), layout_V}, threadIdx.x % 32);
 
+    // Allocate the shared memory tile loader for O. We use the same as K so be careful!!!
     using Smem_O_cl = fmha::FMHAEpilogue<Cta_tile_o>;
     Smem_O_cl smem_o_cl(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
-    // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-    //     printf("smem_o address = 0x%p\n", smem_ + Gemm1::SMEM_OFFSET_O);
-    // }
 
     // Allocate the global memory tile loader for Q.
     LayoutQ gmem_layout_Q(params.q_row_stride_in_elts);
