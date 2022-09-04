@@ -1576,34 +1576,32 @@ struct Smem_tile_transpose {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Gmem_tile>
+template<int kRows, int kRowsPerMma, int kWarpCountM>
 struct Smem_tile_softmax_lse {
 
-    using Cta_tile = typename Gmem_tile::Cta_tile;
-    using Mma_tile = fmha::Hmma_tile<Cta_tile>;
-
-    // The size of each element.
-    static constexpr int BYTES_PER_ELEMENT = sizeof(float);
-    static constexpr int ROWS = Gmem_tile::ROWS;
-    static constexpr int THREADS_PER_ROW = Gmem_tile::THREADS_PER_ROW;
-    static constexpr int MMAS_M = Mma_tile::MMAS_M;
-
-    static constexpr int ROWS_PER_MMA = Mma_tile::M_PER_MMA;
+    static constexpr int kMmaM = (kRows / kWarpCountM) / kRowsPerMma;
+    static_assert(kMmaM * kRowsPerMma * kWarpCountM == kRows);
+    // static_assert(kWarpCountM == 1);
+    // Otherwise we might need to check warp_idx / kWarpCountM == 0 instead of just warp_idx == 0
 
     // The size of one buffer in bytes in shared memory.
-    static constexpr int BYTES_PER_TILE = ROWS * BYTES_PER_ELEMENT;
+    static constexpr int BYTES_PER_TILE = kRows * sizeof(float);
 
     inline __device__ Smem_tile_softmax_lse(float *smem) : smem_(smem) {
     }
 
-    inline __device__ void store_pair(const float (&sum)[MMAS_M * 2]) {
+    inline __device__ void store_pair(const float (&sum)[kMmaM * 2]) {
+        const int warp_idx = threadIdx.x / 32;
+        const int warp_n = warp_idx / kWarpCountM;
         // Extract the position in the warp.
-        int lane = cutlass::arch::LaneId();
-        int row = lane / 4;
-        #pragma unroll
-        for (int mi = 0; mi < MMAS_M; ++mi) {
-            smem_[mi * ROWS_PER_MMA + row + 0] = sum[mi * 2 + 0];
-            smem_[mi * ROWS_PER_MMA + row + 8] = sum[mi * 2 + 1];
+        const int lane = cutlass::arch::LaneId();
+        const int row = lane / 4;
+        if ((lane % 4 == 0) && (warp_n == 0)) {
+            #pragma unroll
+            for (int mi = 0; mi < kMmaM; ++mi) {
+                smem_[mi * kRowsPerMma + row + 0] = sum[mi * 2 + 0];
+                smem_[mi * kRowsPerMma + row + 8] = sum[mi * 2 + 1];
+            }
         }
     }
 

@@ -639,6 +639,16 @@ static inline __device__ uint16_t hmul(uint16_t a, uint16_t b) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+static inline __device__ void uint4_to_ushort8(const uint4 a, uint16_t (&b)[8]) {
+    uint32_t *b_tmp = reinterpret_cast<uint32_t *>(&b[0]);
+    b_tmp[0] = a.x;
+    b_tmp[1] = a.y;
+    b_tmp[2] = a.z;
+    b_tmp[3] = a.w;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 static inline __device__ float sigmoid(float x) {
     return 1.f / (1.f + expf(-x));
 }

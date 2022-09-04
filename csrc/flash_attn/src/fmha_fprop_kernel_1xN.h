@@ -543,7 +543,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Compute the max.
         float p_max[Mma_tile_p::MMAS_M * 2];
         if (!Is_first) {
-            // TODO: Not all thread should write to smem
             smem_softmax_lse.store_pair(p_prev_lse);
             // for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi]; }
             for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) { p_max[mi] = p_prev_lse[mi] / params.scale_bmm1; }

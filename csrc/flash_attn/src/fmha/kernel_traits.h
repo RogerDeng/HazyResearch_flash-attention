@@ -83,10 +83,6 @@ struct FMHA_kernel_traits {
     // The global memory tile to store the softmax sum.
     using Gmem_softmax_sum = fmha::Gmem_summary_stats<Cta_tile_p>;
 
-    // The shared memory tile to store softmax lse.
-    // using Smem_softmax_lse = fmha::Smem_tile_dp_sum<Gmem_tile_q, 2>;
-    using Smem_softmax_lse = fmha::Smem_tile_softmax_lse<Gmem_tile_q>;
-
     using elem_type = elem_type_;
 
     // Make sure the number of threads match.
@@ -175,6 +171,9 @@ struct FMHA_kernel_traits {
       0,
       typename MmaCorePV::IteratorThreadMapB
     >;
+
+    // The shared memory tile to store softmax lse.
+    using Smem_softmax_lse = fmha::Smem_tile_softmax_lse<ThreadblockShapeQK::kM, MmaInstructionShape::kM, WarpCountQK::kM>;
 
 };
 
