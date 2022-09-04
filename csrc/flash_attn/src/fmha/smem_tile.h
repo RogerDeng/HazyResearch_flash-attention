@@ -1591,12 +1591,16 @@ struct Smem_tile_softmax_lse {
     }
 
     inline __device__ void store_pair(const float (&sum)[kMmaM * 2]) {
-        const int warp_idx = threadIdx.x / 32;
+        // Broadcast the warp_id computed by lane 0 to ensure dependent code
+        // is compiled as warp-uniform.
+        // This makes a difference of 50us for BERT.
+        // const int warp_idx = threadIdx.x / 32;
+        const int warp_idx = __shfl_sync(0xffffffff, threadIdx.x / 32, 0);
+        const int lane_idx =  threadIdx.x % 32;
         const int warp_n = warp_idx / kWarpCountM;
         // Extract the position in the warp.
-        const int lane = cutlass::arch::LaneId();
-        const int row = lane / 4;
-        if ((lane % 4 == 0) && (warp_n == 0)) {
+        const int row = lane_idx / 4;
+        if ((lane_idx % 4 == 0) && (warp_n == 0)) {
             #pragma unroll
             for (int mi = 0; mi < kMmaM; ++mi) {
                 smem_[mi * kRowsPerMma + row + 0] = sum[mi * 2 + 0];

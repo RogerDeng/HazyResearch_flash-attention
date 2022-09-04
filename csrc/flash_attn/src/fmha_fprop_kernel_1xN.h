@@ -78,14 +78,14 @@ struct Gemm_Q_K_base {
 
     __device__ inline void load_q(int byte_offset=0) {
         typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Cta_tile_p::M, Cta_tile_p::K});
-        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(smem_q_ptr + byte_offset), layout_A}, cutlass::arch::LaneId());
+        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(smem_q_ptr + byte_offset), layout_A}, threadIdx.x % 32);
         iter_A.load(frag_q[0]);
     }
 
 
     __device__ inline void reload_q(int byte_offset=0) {
         typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Cta_tile_p::M, Cta_tile_p::K});
-        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(smem_q_ptr + byte_offset), layout_A}, cutlass::arch::LaneId());
+        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(smem_q_ptr + byte_offset), layout_A}, threadIdx.x % 32);
         iter_A.load(frag_q[0]);
     }
 
@@ -129,8 +129,8 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
 
     __device__ inline void load_k(){
         typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
-        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
-        int warp_idx = threadIdx.x / 32;
+        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, threadIdx.x % 32);
+        const int warp_idx = threadIdx.x / 32;
         iter_B.add_tile_offset({0, warp_idx});
         #pragma unroll
         for( int ki = 0; ki < kIterations; ++ki ) {
@@ -141,7 +141,7 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
 
     __device__ inline void operator()(WarpMma warp_mma, typename WarpMma::FragmentC &acc_p, int byte_offset_q=0){
         typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Base::Cta_tile_p::M, Base::Cta_tile_p::K});
-        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_q_ptr + byte_offset_q), layout_A}, cutlass::arch::LaneId());
+        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_q_ptr + byte_offset_q), layout_A}, threadIdx.x % 32);
         ++iter_A;
         // Do this part of P^T = (Q * K^T)^T.
         #pragma unroll
@@ -195,19 +195,19 @@ struct Gemm_Q_K<Kernel_traits, false> : public Gemm_Q_K_base<Kernel_traits> {
 
     __device__ inline void load_k(){
         typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
-        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
-        int warp_idx = threadIdx.x / 32;
+        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, threadIdx.x % 32);
+        const int warp_idx = threadIdx.x / 32;
         iter_B.add_tile_offset({0, warp_idx});
         iter_B.load(frag_k[0]);
     }
 
     __device__ inline void operator()(WarpMma warp_mma, typename WarpMma::FragmentC &acc_p, int byte_offset_q=0){
         typename WarpMma::LayoutA layout_A = WarpMma::LayoutA::packed({Base::Cta_tile_p::M, Base::Cta_tile_p::K});
-        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(Base::smem_q_ptr + byte_offset_q), layout_A}, cutlass::arch::LaneId());
+        typename WarpMma::IteratorA iter_A({reinterpret_cast<typename WarpMma::ElementA *>(Base::smem_q_ptr + byte_offset_q), layout_A}, threadIdx.x % 32);
         ++iter_A;
         typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
-        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
-        int warp_idx = threadIdx.x / 32;
+        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, threadIdx.x % 32);
+        const int warp_idx = threadIdx.x / 32;
         iter_B.add_tile_offset({0, warp_idx});
         ++iter_B;
 
@@ -226,8 +226,8 @@ struct Gemm_Q_K<Kernel_traits, false> : public Gemm_Q_K_base<Kernel_traits> {
     }
     __device__ inline void reload_k(){
         typename WarpMma::LayoutB layout_B = WarpMma::LayoutB::packed({Cta_tile_p::K, Cta_tile_p::N});
-        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, cutlass::arch::LaneId());
-        int warp_idx = threadIdx.x / 32;
+        typename WarpMma::IteratorB iter_B({reinterpret_cast<typename WarpMma::ElementB *>(Base::smem_k_ptr), layout_B}, threadIdx.x % 32);
+        const int warp_idx = threadIdx.x / 32;
         iter_B.add_tile_offset({0, warp_idx});
         iter_B.load(frag_k[0]);
     }
@@ -355,7 +355,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     SmemLayoutV layout_V = SmemLayoutV::packed({ThreadblockShapePV::kK, ThreadblockShapePV::kN});
     // SmemIterator stores to smem and WarpIterator loads from smem
     SmemIteratorV smem_v_cl({reinterpret_cast<Element *>(smem_v_addr), layout_V}, tidx);
-    WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_addr), layout_V}, cutlass::arch::LaneId());
+    WarpIteratorV iter_V({reinterpret_cast<Element *>(smem_v_addr), layout_V}, threadIdx.x % 32);
 
     using Smem_O_cl = fmha::FMHAEpilogue<Cta_tile_o>;
     Smem_O_cl smem_o_cl(&smem_[Gemm1::SMEM_OFFSET_O], tidx);
@@ -451,9 +451,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // Load the fragments for Q.
     gemm_q_k.load_q();
 
-    // Load the fragments for V. We keep the data in registers during the entire kernel.
-    // copied from mma_pipelined.h
-    int warp_idx = threadIdx.x / 32;
+    // Load the fragments for V. We keep the data in registers during the entire
+    // kernel. copied from mma_pipelined.h
+    const int warp_idx = threadIdx.x / 32;
     iter_V.add_tile_offset({kIterationsPV * warp_idx, 0});
     typename WarpIteratorV::Fragment frag_v_cl[kIterationsPV];
     static_assert(WarpIteratorV::Fragment::kStorageElements == 4 * Mma_tile_o::MMAS_N || WarpIteratorV::Fragment::kStorageElements == 2 * Mma_tile_o::MMAS_N );
@@ -600,7 +600,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         acc_o_cl.clear();
 
         // For some reason, WarpMmaPV::FragmentA has length K * N * (8|4) instead of just N * (8|4).
-        // We we have to first cast frag_p to be array of k x (N * (8|4)), then cast each row to be
+        // We have to first cast frag_p to be array of k x (N * (8|4)), then cast each row to be
         // an array of WarpMmaPV::FragmentA (which is what mma_pv expects).
         static_assert(decltype(frag_p)::kElements == kIterationsPV * Mma_tile_o::MMAS_M * WarpMmaPV::FragmentA::kElements);
         const auto frag_p_reshaped = reinterpret_cast<const cutlass::Array<Element, WarpMmaPV::FragmentA::kElements> (&)[kIterationsPV]>(frag_p);
@@ -749,7 +749,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // Trigger the load from shared memory for the next series of Q values.
         if(l < steps - 1) {
             gemm_q_k.reload_q();
-            // gemm_q_k.reload_q(((l + 1) % 2) * Gemm1::Smem_tile_q::BYTES_PER_BUFFER);
         }
 
     }  // Outer loop over the sequence length.

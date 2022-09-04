@@ -62,7 +62,7 @@ struct FMHAEpilogue {
     //     typename WarpMma::Shape, typename WarpMma::Policy::Operator::Shape,
     //     typename WarpMma::Policy::Operator::ElementC, LayoutC>;
 
-    // TODO: looks like elementsPerAccess should vary: 4 for d=64, 2 for d=32?
+    // Maybe elementsPerAccess should vary: 4 for d=64, 2 for d=32?
     using OutputTileThreadMap = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
         ThreadblockShapePV, typename WarpMma::Shape, kPartitionsK, Element, /*ElementsPerAccess=*/4>::Type;
     using OutputTileThreadMapAccum = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
@@ -72,7 +72,7 @@ struct FMHAEpilogue {
         OutputTileThreadMap,
         Element
     >;
-    // TODO: which ThreadMap should we use?
+    // which ThreadMap should we use?
     using GmemIteratorAccum = cutlass::epilogue::threadblock::PredicatedTileIterator<
         // OutputTileThreadMapAccum,
         OutputTileThreadMap,
@@ -106,7 +106,7 @@ struct FMHAEpilogue {
 
     inline __device__ FMHAEpilogue(void *smem, const int tidx)
         : shared_storage(reinterpret_cast<SharedStorage *>(smem))
-        , warp_tile_iterator(shared_storage->reference(), cutlass::arch::LaneId()) {
+        , warp_tile_iterator(shared_storage->reference(), threadIdx.x % 32) {
 
         // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y) == 0) {
         //     printf("smem_o_cl, shared_storage = 0x%p\n", shared_storage);
@@ -138,8 +138,7 @@ struct FMHAEpilogue {
     // Store the accumulators.
     static inline __device__ void store_static(const AccumulatorTile &acc,
                                         void *smem, const int tidx) {
-        // const int lane_idx = tidx % 32;
-        const int lane_idx = cutlass::arch::LaneId();
+        const int lane_idx = tidx % 32;
         // const int warp_idx = tidx / 32;
         // Broadcast the warp_id computed by lane 0 to ensure dependent code
         // is compiled as warp-uniform.
