@@ -558,57 +558,20 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         softmax.template reduce_max</*zero_init=*/Is_first>(p_max);
 
-        // if ((threadIdx.x == 0) && (l == 38)) {
-        //     printf("loop_step_idx %d, p_max = %.6f, %.6f., p_prev_lse = %.6f, %.6f\n", loop_step_idx, p_max[0], p_max[1], Is_first ? -10000.f : p_prev_lse[0], Is_first ? -10000.f : p_prev_lse[1]);
-        // }
-
-        // if (!Is_first) {
-        //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-        //         printf("after reduce_max=%.6f, %.6f\n", softmax.elt_[0][0], softmax.elt_[0][1]);
-        //     }
-        // }
-
         // Compute the exponential value.
-        // softmax.apply_exp(p_max);
         softmax.scale_apply_exp(p_max, params.scale_bmm1);
 
-        // if (!Is_first) {
-        //     if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
-        //         printf("after apply_exp=%.6f, %.6f\n", softmax.elt_[0][0], softmax.elt_[0][1]);
-        //     }
-        // }
-
+        // We don't finalize the sum computation here, as that would incur an extra sync_threads().
+        // Instead, we reduce the sum from each warp, write to smem, then wait until the sync_threads()
+        // from storing acc_o. Then we read the sum of each warp from smem and finalize the reduction.
+        // As a consequence, we don't scale acc_p by the inverse sum, we scale the output by the inverse sum.
         // Compute the sum.
         float p_sum[Mma_tile_p::MMAS_M * 2];
-        // if (!Is_first) {
-        //     int warp = tidx / Cta_tile_p::THREADS_PER_WARP;
-        //     int lane = tidx % Cta_tile_p::THREADS_PER_WARP;
-        //     for (int mi = 0; mi < Mma_tile_p::MMAS_M * 2; mi++) {
-        //         p_sum[mi] = ((warp == 0) && (lane % 4 == 0)) ? expf(p_prev_lse[mi] - p_max[mi]) : 0;
-        //     }
-        // }
         // softmax.reduce_sum(p_sum);
         softmax.reduce_sum_before_sync_(p_sum);
-        // softmax.template reduce_sum_before_sync_</*zero_init=*/Is_first>(p_sum);
-
-        // float p_sum_log[Mma_tile_p::MMAS_M * 2];
-        // for (int mi = 0; mi  < Mma_tile_p::MMAS_M * 2; ++mi) {
-        //     float sum = p_sum[mi];
-        //     // p_sum_log[mi] = (sum == 0.f || sum != sum) ? INFINITY : p_max[mi] + __logf(sum);
-        //     constexpr float kLog2e = M_LOG2E;
-        //     p_sum_log[mi] = (sum == 0.f || sum != sum) ? INFINITY : p_max[mi] * kLog2e + __log2f(sum);
-        // }
-        // // gmem_softmax_lse.store(reinterpret_cast<uint32_t(&)[Mma_tile_p::MMAS_M * 2]>(p_sum));
-        // gmem_softmax_lse.store(reinterpret_cast<uint32_t(&)[Mma_tile_p::MMAS_M * 2]>(p_sum_log));
-        // gmem_softmax_lse.move();
-
-        // // Finalize softmax on the accumulators of P^T.
-        // softmax.scale(p_sum);
 
         constexpr bool encode_dropout_in_sign_bit = Return_softmax;
         if (Is_dropout) {
-            // softmax.template apply_dropout<encode_dropout_in_sign_bit>(ph0, params.p_dropout_in_uint);
-            // softmax.template apply_dropout<encode_dropout_in_sign_bit>(ph0, ph1, params.p_dropout_in_uint);
             softmax.template apply_dropout_16bits<encode_dropout_in_sign_bit>(ph0, ph1, params.p_dropout_in_uint16_t);
         }
 
@@ -619,8 +582,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         auto frag_p = convert_p(acc_p);
 
         if (Return_softmax) {
-            // gmem_s.store(frag_p, mask);
-            // gmem_s.template store<Mma_tile_o::MMAS_K, Mma_tile_o::MMAS_M>(frag_p, mask);
             gmem_s.store_cl(reinterpret_cast<const cutlass::Array<Element, 8>(&)[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_M]>(frag_p), mask);
             gmem_s.move();
         }

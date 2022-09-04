@@ -173,9 +173,6 @@ struct Softmax_base {
         :  // packed_mask_ptr_(reinterpret_cast<const char*>(params.packed_mask_ptr)),
           smem_(reinterpret_cast<float *>(smem)), tidx_(tidx) {
 
-        // Move to the 1st mask loaded by the thread+ tidx;
-        // packed_mask_ptr_ += bidb * params.packed_mask_stride_in_bytes + tidx * sizeof(uint32_t);
-
         // Extract the position in the warp.
         int warp = tidx / Cta_tile::THREADS_PER_WARP;
         int lane = tidx % Cta_tile::THREADS_PER_WARP;
@@ -219,25 +216,6 @@ struct Softmax_base {
     }
 
     // Apply the exp to all the elements.
-    template <bool max_in_base2=false, bool elt_in_base2=false>
-    inline __device__ void apply_exp(const float (&max)[MMAS_M * 2]) {
-        #pragma unroll
-        for( int mi = 0; mi < MMAS_M * 2; ++mi ) {
-            // Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
-            // max * log_2(e)) This allows the compiler to use the ffma
-            // instruction instead of fadd and fmul separately.
-            constexpr float kLog2e = M_LOG2E;
-            const float max_base2 = max_in_base2 ? max[mi] : max[mi] * kLog2e;
-            #pragma unroll
-            for( int ni = 0; ni < MMAS_N * 4; ++ni ) {
-                // elt_[mi][ni] = apply_exp_(elt_[mi][ni], max[mi]);
-                elt_[mi][ni] = apply_exp2_(elt_in_base2 ? elt_[mi][ni] : elt_[mi][ni] * kLog2e,
-                                           max_base2);
-            }
-        }
-    }
-
-    // Apply the exp to all the elements.
     template <bool scale_max=true>
     inline __device__ void scale_apply_exp(const float (&max)[MMAS_M * 2], const float scale_) {
         const float max_scale = scale_max ? scale_ * M_LOG2E : M_LOG2E;
@@ -256,73 +234,6 @@ struct Softmax_base {
     }
 
     template <bool encode_dropout_in_sign_bit=false>
-    inline __device__ void apply_dropout(Philox &ph, uint32_t p_dropout_in_uint) {
-        // We encode the dropout pattern in the sign bit of the non-negative
-        // softmax to distinguish from pre-existing zeros
-        auto encode_dropout = [](bool keep, float val) {
-            return keep ? val : (encode_dropout_in_sign_bit ? -val : float(0));
-        };
-        #pragma unroll
-        for( int mi = 0; mi < MMAS_M * 2; mi++ ) {
-            #pragma unroll
-            for( int ni = 0; ni < MMAS_N; ni++ ) {
-                uint4 tmp = ph();
-                // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-                //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, tmp.x, tmp.y, tmp.z, tmp.w);
-                // }
-                elt_[mi][4 * ni + 0] =
-                    encode_dropout(tmp.x <= p_dropout_in_uint, elt_[mi][4 * ni + 0]);
-                elt_[mi][4 * ni + 1] =
-                    encode_dropout(tmp.y <= p_dropout_in_uint, elt_[mi][4 * ni + 1]);
-                elt_[mi][4 * ni + 2] =
-                    encode_dropout(tmp.z <= p_dropout_in_uint, elt_[mi][4 * ni + 2]);
-                elt_[mi][4 * ni + 3] =
-                    encode_dropout(tmp.w <= p_dropout_in_uint, elt_[mi][4 * ni + 3]);
-            }
-        }
-    }
-
-    template <bool encode_dropout_in_sign_bit=false>
-    inline __device__ void apply_dropout(Philox &ph0, Philox &ph1, uint32_t p_dropout_in_uint) {
-        // We encode the dropout pattern in the sign bit of the non-negative
-        // softmax to distinguish from pre-existing zeros
-        auto encode_dropout = [](bool keep, float val) {
-            return keep ? val : (encode_dropout_in_sign_bit ? -val : float(0));
-        };
-        #pragma unroll
-        for( int mi = 0; mi < MMAS_M * 2; mi++ ) {
-            static_assert(MMAS_N % 2 == 0);
-            #pragma unroll
-            for( int ni = 0; ni < MMAS_N; ni += 2 ) {
-                uint4 tmp = ph0();
-                // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-                //     printf("ni = %d, ph0, Philox: %u, %u, %u, %u\n", ni, tmp.x, tmp.y, tmp.z, tmp.w);
-                // }
-                elt_[mi][4 * ni + 0] =
-                    encode_dropout(tmp.x <= p_dropout_in_uint, elt_[mi][4 * ni + 0]);
-                elt_[mi][4 * ni + 1] =
-                    encode_dropout(tmp.y <= p_dropout_in_uint, elt_[mi][4 * ni + 1]);
-                elt_[mi][4 * ni + 2] =
-                    encode_dropout(tmp.z <= p_dropout_in_uint, elt_[mi][4 * ni + 2]);
-                elt_[mi][4 * ni + 3] =
-                    encode_dropout(tmp.w <= p_dropout_in_uint, elt_[mi][4 * ni + 3]);
-                tmp = ph1();
-                // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-                //     printf("ni = %d, ph1, Philox: %u, %u, %u, %u\n", ni + 1, tmp.x, tmp.y, tmp.z, tmp.w);
-                // }
-                elt_[mi][4 * (ni + 1) + 0] =
-                    encode_dropout(tmp.x <= p_dropout_in_uint, elt_[mi][4 * (ni + 1) + 0]);
-                elt_[mi][4 * (ni + 1) + 1] =
-                    encode_dropout(tmp.y <= p_dropout_in_uint, elt_[mi][4 * (ni + 1) + 1]);
-                elt_[mi][4 * (ni + 1) + 2] =
-                    encode_dropout(tmp.z <= p_dropout_in_uint, elt_[mi][4 * (ni + 1) + 2]);
-                elt_[mi][4 * (ni + 1) + 3] =
-                    encode_dropout(tmp.w <= p_dropout_in_uint, elt_[mi][4 * (ni + 1) + 3]);
-            }
-        }
-    }
-
-    template <bool encode_dropout_in_sign_bit=false>
     inline __device__ void apply_dropout_16bits(Philox &ph, uint16_t p_dropout_in_uint16_t) {
         // We encode the dropout pattern in the sign bit of the non-negative
         // softmax to distinguish from pre-existing zeros
@@ -333,17 +244,18 @@ struct Softmax_base {
         for( int mi = 0; mi < MMAS_M; mi++ ) {
             #pragma unroll
             for( int ni = 0; ni < MMAS_N; ni++ ) {
-                uint16_t tmp[8];
-                fmha::uint4_to_ushort8(ph(), tmp);
+                uint4 random_uint4 = ph();
+                uint16_t (&rnd)[8] = reinterpret_cast<uint16_t (&)[8]>(random_uint4);
+                // fmha::uint4_to_ushort8(ph(), rnd);
                 // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-                //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, tmp.x, tmp.y, tmp.z, tmp.w);
+                //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, rnd.x, rnd.y, rnd.z, rnd.w);
                 // }
                 #pragma unroll
                 for (int ii = 0; ii < 2; ++ii) {
                     #pragma unroll
                     for (int jj = 0; jj < 4; ++jj) {
                         elt_[mi * 2 + ii][4 * ni + jj] =
-                            encode_dropout(tmp[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
+                            encode_dropout(rnd[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
                     }
                 }
             }
@@ -362,67 +274,36 @@ struct Softmax_base {
             static_assert(MMAS_N % 2 == 0);
             #pragma unroll
             for( int ni = 0; ni < MMAS_N; ni += 2 ) {
-                uint16_t tmp[8];
-                fmha::uint4_to_ushort8(ph0(), tmp);
+                uint4 random_uint4 = ph0();
+                uint16_t (&rnd0)[8] = reinterpret_cast<uint16_t (&)[8]>(random_uint4);
                 // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-                //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, tmp.x, tmp.y, tmp.z, tmp.w);
+                //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, rnd0.x, rnd0.y, rnd0.z, rnd0.w);
                 // }
                 #pragma unroll
                 for (int ii = 0; ii < 2; ++ii) {
                     #pragma unroll
                     for (int jj = 0; jj < 4; ++jj) {
                         elt_[mi * 2 + ii][4 * ni + jj] =
-                            encode_dropout(tmp[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
+                            encode_dropout(rnd0[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * ni + jj]);
                     }
                 }
-                fmha::uint4_to_ushort8(ph1(), tmp);
+                random_uint4 = ph1();
+                uint16_t (&rnd1)[8] = reinterpret_cast<uint16_t (&)[8]>(random_uint4);
                 // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0)) {
-                //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, tmp.x, tmp.y, tmp.z, tmp.w);
+                //     printf("ni = %d, ph  Philox: %u, %u, %u, %u\n", ni, rnd1.x, rnd1.y, rnd1.z, rnd1.w);
                 // }
                 #pragma unroll
                 for (int ii = 0; ii < 2; ++ii) {
                     #pragma unroll
                     for (int jj = 0; jj < 4; ++jj) {
                         elt_[mi * 2 + ii][4 * (ni + 1) + jj] =
-                            encode_dropout(tmp[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * (ni + 1) + jj]);
+                            encode_dropout(rnd1[ii * 4 + jj] <= p_dropout_in_uint16_t, elt_[mi * 2 + ii][4 * (ni + 1) + jj]);
                     }
                 }
             }
         }
     }
 
-    // Scale all the elements.
-    inline __device__ void scale(const float (&sum)[MMAS_M * 2]) {
-        // Precompute the inverse sum to normalize. Without -use_fast_math, it makes a huge deal.
-        float inv_sum[MMAS_M * 2];
-        #pragma unroll
-        for( int mi = 0; mi < MMAS_M * 2; ++mi ) {
-            inv_sum[mi] = (sum[mi] == 0.f || sum[mi] != sum[mi]) ? 1.f : 1.f / sum[mi];
-        }
-
-        // Update the values.
-        #pragma unroll
-        for( int mi = 0; mi < MMAS_M * 2; ++mi ) {
-            #pragma unroll
-            for( int ni = 0; ni < MMAS_N * 4; ++ni ) {
-                elt_[mi][ni] *= inv_sum[mi];
-            }
-        }
-    }
-
-    // Subtract all elements by dp_sum
-    inline __device__ void subtract_dp_sum(const float (&dp_sum)[MMAS_M * 2]) {
-        #pragma unroll
-        for( int mi = 0; mi < MMAS_M * 2; ++mi ) {
-            #pragma unroll
-            for( int ni = 0; ni < MMAS_N * 4; ++ni ) {
-                elt_[mi][ni] -= dp_sum[mi];
-            }
-        }
-    }
-
-    // The pointer to the mask.
-    const char *packed_mask_ptr_;
     // Shared memory for the CTA-wide reduction.
     float *smem_, *smem_write_, *smem_read_;
     // The current thread index.

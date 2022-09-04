@@ -548,7 +548,7 @@ inline __device__ float2 half2_unpack<__nv_bfloat16>(uint32_t a) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Converted two half2's or bf162's into float, then take their dot product.
+// Convert two half2's or bf162's into float, then take their dot product.
 template <typename T>
 inline __device__ float hfma2_to_float(const uint32_t a, const uint32_t b) {
     float2 af = fmha::half2_unpack<T>(a);
@@ -635,16 +635,6 @@ static inline __device__ uint16_t hmul(uint16_t a, uint16_t b) {
     uint16_t d;
     asm volatile("mul.f16 %0, %1, %2;" : "=h"(d) : "h"(a), "h"(b));
     return d;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-static inline __device__ void uint4_to_ushort8(const uint4 a, uint16_t (&b)[8]) {
-    uint32_t *b_tmp = reinterpret_cast<uint32_t *>(&b[0]);
-    b_tmp[0] = a.x;
-    b_tmp[1] = a.y;
-    b_tmp[2] = a.z;
-    b_tmp[3] = a.w;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1129,36 +1119,11 @@ __device__ inline void  quad_reduce(float (&dst)[M], float (&src)[M], Operator &
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Operator, int M>
-__device__ inline void  quad_reduce(__half2 (&dst)[M], __half2 (&src)[M], Operator &op) {
-    #pragma unroll
-    for(int mi=0; mi < M; mi++){
-        dst[mi] = src[mi];
-        dst[mi] = op(dst[mi], __shfl_down_sync(uint32_t(-1), dst[mi], 2));
-        dst[mi] = op(dst[mi], __shfl_down_sync(uint32_t(-1), dst[mi], 1));
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename Operator, int M>
 __device__ inline void quad_reduce(float (&dst)[M], float2 (&src)[M], Operator &op) {
     float tmp[M];
     #pragma unroll
     for(int mi=0; mi < M; mi++){
         tmp[mi] = op(src[mi].x, src[mi].y);
-    }
-    quad_reduce(dst, tmp, op);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename Operator, int M>
-__device__ inline void quad_reduce(__half2 (&dst)[M], float2 (&src)[M], Operator &op) {
-    __half2 tmp[M];
-    #pragma unroll
-    for(int mi=0; mi < M; mi++){
-        tmp[mi] = op(reinterpret_cast<const __half2 &>(src[mi].x),
-                     reinterpret_cast<const __half2 &>(src[mi].y));
     }
     quad_reduce(dst, tmp, op);
 }
@@ -1177,35 +1142,11 @@ __device__ inline void quad_allreduce(float (&dst)[M], float (&src)[M], Operator
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Operator, int M>
-__device__ inline void quad_allreduce(__half2 (&dst)[M], __half2 (&src)[M], Operator &op) {
-    #pragma unroll
-    for(int mi=0; mi < M; mi++){
-        dst[mi] = src[mi];
-        dst[mi] = Allreduce<4>::run(dst[mi], op);
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename Operator, int M>
 __device__ inline void quad_allreduce(float (&dst)[M], float2 (&src)[M], Operator &op) {
     float tmp[M];
     #pragma unroll
     for(int mi=0; mi < M; mi++){
         tmp[mi] = op(src[mi].x, src[mi].y);
-    }
-    quad_allreduce(dst, tmp, op);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename Operator, int M>
-__device__ inline void quad_allreduce(__half2 (&dst)[M], float2 (&src)[M], Operator &op) {
-    __half2 tmp[M];
-    #pragma unroll
-    for(int mi=0; mi < M; mi++){
-        tmp[mi] = op(reinterpret_cast<const __half2 &>(src[mi].x),
-                     reinterpret_cast<const __half2 &>(src[mi].y));
     }
     quad_allreduce(dst, tmp, op);
 }
