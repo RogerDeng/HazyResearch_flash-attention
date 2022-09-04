@@ -68,7 +68,6 @@ struct FMHA_kernel_traits {
     // The shared memory tile to swizzle V.
 
     // The global memory tile to store O.
-    using Gmem_tile_o = fmha::Gmem_tile_o<Cta_tile_o>;
 
     // The global memory tile to load/store S.
     using Gmem_tile_s = fmha::Gmem_tile_mma_s<Cta_tile_p>;

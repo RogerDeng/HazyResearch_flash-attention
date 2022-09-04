@@ -83,13 +83,6 @@ struct Smem_tile_reduce {
     static constexpr int BYTES_PER_TILE = ROWS * COLS * sizeof(float);
     static constexpr int ELTS_PER_TILE = ROWS * COLS;
 
-    static constexpr int THREADS_PER_GROUP = Kernel_traits::Gmem_tile_o::THREADS_PER_ROW;
-    // TD [2022-05-02]: No longer true if head_dim != 64
-    // static_assert(THREADS_PER_GROUP == 16); // DEBUG
-    static constexpr int ROWS_PER_WARP = 32 / THREADS_PER_GROUP;
-    static constexpr int LOOPS = Kernel_traits::Gmem_tile_o::LOOPS;
-    static_assert(LOOPS == 1);
-
     using read_t = typename ReadType<COLS>::T;
 
     __device__ inline Smem_tile_reduce(float *smem_, const int tidx) {

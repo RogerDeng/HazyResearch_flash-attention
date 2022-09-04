@@ -280,9 +280,6 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     using GmemIteratorO = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIterator;
     using GmemIteratorOAccum = typename fmha::FMHAEpilogue<Cta_tile_o>::GmemIteratorAccum;
 
-    using Gmem_tile_o = typename Kernel_traits::Gmem_tile_o;
-    // The shared memory tile to swizzle O.
-
     using Gmem_tile_s = typename Kernel_traits::Gmem_tile_s;
 
     using Gmem_softmax_sum = typename Kernel_traits::Gmem_softmax_sum;
@@ -586,14 +583,10 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         // The mapping from tidx to rows changes between the softmax and the
         // O-reduction. So we recalculate the max.
-        float p_max_o[Gmem_tile_o::STGS_PER_LOOP][Mma_tile_o::MMAS_M];
-        int rows[Gmem_tile_o::STGS_PER_LOOP];
-        // for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
-        //     rows[jj] = tidx / Gmem_tile_o::THREADS_PER_ROW + jj * Gmem_tile_o::ROWS_PER_STG;
-        // }
         using OutputTileThreadMap = typename Smem_O_cl::OutputTileThreadMap;
         constexpr int kOutputRowsPerThread = OutputTileThreadMap::Iterations::kRow * Smem_O_cl::kIterationsStore;
-        static_assert(Gmem_tile_o::STGS_PER_LOOP == kOutputRowsPerThread);
+        float p_max_o[kOutputRowsPerThread][Mma_tile_o::MMAS_M];
+        int rows[kOutputRowsPerThread];
         cutlass::MatrixCoord output_thread_offset = OutputTileThreadMap::initial_offset(tidx);
         const int output_thread_start_row = output_thread_offset.row();
         const int output_thread_start_column = output_thread_offset.column();
@@ -605,32 +598,30 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         softmax.reduce_max_after_sync_(p_max_o, rows);
         static_assert(Mma_tile_o::MMAS_M == 1);
-        for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+        for (int jj = 0; jj < kOutputRowsPerThread; jj++) {
             p_max_o[jj][0] *= params.scale_bmm1;
         }
-        float p_prev_scale_o[Gmem_tile_o::STGS_PER_LOOP];
+        float p_prev_scale_o[kOutputRowsPerThread];
         if (!Is_first) {
             smem_softmax_lse.load(p_prev_scale_o, rows);
         }
-
-        static_assert(Gmem_tile_o::LOOPS == 1);
 
         // Make sure the data is in shared memory.
         __syncthreads();
 
         static_assert(Mma_tile_o::MMAS_M == 1);
-        float p_sum_o[Gmem_tile_o::STGS_PER_LOOP][Mma_tile_o::MMAS_M];
+        float p_sum_o[kOutputRowsPerThread][Mma_tile_o::MMAS_M];
         softmax.reduce_sum_after_sync_(p_sum_o, rows);
         if (!Is_first) {
-            for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+            for (int jj = 0; jj < kOutputRowsPerThread; jj++) {
                 p_prev_scale_o[jj] = expf(p_prev_scale_o[jj] - p_max_o[jj][0]);
                 p_sum_o[jj][0] += p_prev_scale_o[jj];
             }
         }
 
-        float p_sum_log[Gmem_tile_o::STGS_PER_LOOP][Mma_tile_o::MMAS_M];
+        float p_sum_log[kOutputRowsPerThread][Mma_tile_o::MMAS_M];
         #pragma unroll
-        for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+        for (int jj = 0; jj < kOutputRowsPerThread; jj++) {
             float sum = p_sum_o[jj][0];
             p_sum_log[jj][0] = (sum == 0.f || sum != sum) ? -INFINITY : p_max_o[jj][0] + __logf(sum);
             if (output_thread_start_column == 0) {
@@ -646,7 +637,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         cutlass::multiplies<ArrayTypeO> multiply_fragments;
         if (!Is_first) {
             auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kOutputRowsPerThread]>(out_cl);
-            for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+            for (int jj = 0; jj < kOutputRowsPerThread; jj++) {
                 out_cl_reshaped[jj] = multiply_fragments(out_cl_reshaped[jj], p_prev_scale_o[jj]);
             }
         }
@@ -661,7 +652,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             || ((Is_causal) && ((begin + l) * Cta_tile_p::M < (loop_step_idx + 1) * Cta_tile_p::N));
         auto out_cl_reshaped = reinterpret_cast<ArrayTypeO (&)[kOutputRowsPerThread]>(out_cl);
         #pragma unroll
-        for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
+        for (int jj = 0; jj < kOutputRowsPerThread; jj++) {
             float sum = p_sum_o[jj][0];
             float inv_sum = (sum == 0.f || sum != sum) ? 1.f : 1.f / sum;
             if (Is_dropout && is_final_write) {
