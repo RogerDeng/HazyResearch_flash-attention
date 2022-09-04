@@ -116,25 +116,6 @@ struct Gmem_tile_mma_s : public Base {
 
     // Store to global memory.
     template<typename Mask, typename Fragment>
-    inline __device__ void store(const Fragment (&frag)[N][M], const Mask& mask){
-        #pragma unroll
-        for( int mi = 0; mi < M; mi++ ) {
-            #pragma unroll
-            for( int ni = 0; ni < N; ni++ ) {
-                uint4 dst;
-                dst.x = frag[ni][mi].reg(0);
-                dst.y = frag[ni][mi].reg(2);
-                dst.z = frag[ni][mi].reg(1);
-                dst.w = frag[ni][mi].reg(3);
-                if( mask.any_valid(mi, ni) ) {
-                    Base::store(dst, mi, ni);
-                }
-            }
-        }
-    }
-
-    // Store to global memory.
-    template<typename Mask, typename Fragment>
     inline __device__ void store_cl(const Fragment (&frag)[N][M], const Mask& mask){
         static_assert(Fragment::kStorageElements == 4);
         #pragma unroll
