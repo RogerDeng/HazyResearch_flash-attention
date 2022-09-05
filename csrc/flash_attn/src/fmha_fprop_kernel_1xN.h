@@ -226,14 +226,6 @@ constexpr size_t get_dynamic_smem_size(){
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Return_softmax, bool Is_first, bool Is_last, typename Params, typename Prng>
 inline __device__ void device_1xN_(const Params &params, const int bidb, const int bidh, int begin, int steps, Prng &ph0, Prng &ph1, const int loop_step_idx) {
 
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
-    using elem_type = typename Kernel_traits::elem_type;
-#else
-    constexpr bool is_fp16_type = std::is_same<typename Kernel_traits::elem_type, __half>::value;
-    assert(is_fp16_type);
-    using elem_type = __half;
-#endif
-
     // The description of the CTA tile for the 1st batched GEMM.
     using Cta_tile_p = typename Kernel_traits::Cta_tile_p;
     // The description of the CTA tile for the 2nd batched GEMM.

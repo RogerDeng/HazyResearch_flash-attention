@@ -218,7 +218,7 @@ mha_fwd(const at::Tensor &q,         // total_q x num_heads x head_size, total_q
                      softmax_scale,
                      is_causal);
 
-    run_fmha_fp16_sm80(launch_params, /*configure=*/ true);
+    run_fmha_fprop(launch_params, /*configure=*/ true);
     // number of times random will be generated per thread, to offset philox counter in thc random
     // state
     int64_t counter_offset = launch_params.elts_per_thread;
@@ -230,7 +230,7 @@ mha_fwd(const at::Tensor &q,         // total_q x num_heads x head_size, total_q
         launch_params.params.philox_args = gen->philox_cuda_state(counter_offset);
     }
 
-    run_fmha_fp16_sm80(launch_params, /*configure=*/false);
+    run_fmha_fprop(launch_params, /*configure=*/false);
 
     std::vector<at::Tensor> result = {o, softmax_lse};
     if (return_softmax) {result.push_back(s);}

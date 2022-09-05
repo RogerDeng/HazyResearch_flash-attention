@@ -27,8 +27,6 @@
 
 #pragma once
 
-#include <cuda_fp16.h>
-
 #include "cutlass/gemm/gemm.h"
 
 #include "cutlass/cutlass.h"
@@ -42,7 +40,7 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<int S, int D, int STEP, int WARPS_M, int WARPS_N, uint32_t FLAGS = 0x08u, typename elem_type_=__half>
+template<int S, int D, int STEP, int WARPS_M, int WARPS_N, uint32_t FLAGS = 0x08u, typename elem_type=cutlass::half_t>
 struct FMHA_kernel_traits {
 
     // The CTA description for the 1st GEMM.
@@ -57,25 +55,11 @@ struct FMHA_kernel_traits {
     // Do we keep V in registers.
     static constexpr bool V_IN_REGS = (FLAGS & 0x100u) == 0u;
 
-    // The global memory tile to load Q.
-
-    // The shared memory tile to swizzle Q.
-
-    // The global memory tile to load K.
-    // The shared memory tile to swizzle K.
-
-    // The global memory tile to load V.
-    // The shared memory tile to swizzle V.
-
-    // The global memory tile to store O.
-
     // The global memory tile to load/store S.
     using Gmem_tile_s = fmha::Gmem_tile_mma_s<Cta_tile_p>;
 
     // The global memory tile to store the softmax sum.
     using Gmem_softmax_sum = fmha::Gmem_summary_stats<Cta_tile_p>;
-
-    using elem_type = elem_type_;
 
     // The number of threads.
     static constexpr int THREADS = Cta_tile_p::THREADS_PER_CTA;
@@ -92,7 +76,11 @@ struct FMHA_kernel_traits {
     // TD [2022-06-02] We don't support Volta (SM70) yet.
 #endif
 
+#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
+    using Element = elem_type;
+#else
     using Element = cutlass::half_t;
+#endif
     using ElementAccum = float;
 
     static_assert(WARPS_M == 1);
