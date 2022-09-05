@@ -108,15 +108,16 @@ cc_flag = []
 _, bare_metal_major, _ = get_cuda_bare_metal_version(CUDA_HOME)
 if int(bare_metal_major) < 11:
     raise RuntimeError("FlashAttention is only supported on CUDA 11")
-# cc_flag.append("-gencode")
-# cc_flag.append("arch=compute_75,code=sm_75")
+cc_flag.append("-gencode")
+cc_flag.append("arch=compute_75,code=sm_75")
 cc_flag.append("-gencode")
 cc_flag.append("arch=compute_80,code=sm_80")
 
 subprocess.run(["git", "submodule", "update", "--init", "csrc/flash_attn/cutlass"])
 ext_modules.append(
     CUDAExtension(
-        name="flash_attn_cuda_cutlass",
+        name="flash_attn_cuda",
+        # name="flash_attn_cuda_cutlass",
         sources=[
             "csrc/flash_attn/fmha_api.cpp",
             "csrc/flash_attn/src/fmha_fprop_kernel_dispatch.cu",

@@ -17,6 +17,12 @@ As Triton is a higher-level language than CUDA, it might be easier to understand
 and experiment with. The notations in the Triton implementation are also closer
 to what's used in our paper.
 
+## Cutlass Rewrite
+
+This branch contains the rewrite of FlashAttention forward pass to use Cutlass.
+This simplifies the code and supports more head dimensions. We support head
+dimensions that are multiples of 8 up to 128 (previously we supported head
+dimensions 16, 32, 64, 128).
 
 ## Alpha release (0.1).
 
@@ -40,14 +46,15 @@ FlashAttention currently supports:
 Our tentative roadmap:
 1. [Jun 2022] Make package pip-installable.
 2. ~~[Jun 2022] Support SM86 GPUs (e.g., RTX 3080, 3090)~~[Done].
-3. [Jun 2022] Refactor to use Cutlass.
+3. ~~[Jun 2022] Refactor forward pass to use Cutlass~~[Done].
 4. ~~[Jun 2022] Support SM75 GPUs (e.g. T4)~~[Done].
 5. ~~[Jun 2022] Support bf16~~[Done].
 6. ~~[Jul 2022] Implement cross-attention~~[Done].
 7. ~~[Jul 2022] Support head dimension 128~~[Done].
-8. [Jul 2022] Support SM70 GPUs (V100).
-9. [Aug 2022] Fuse rotary embedding.
-10. [Aug 2022] Support attention bias (e.g. ALiBi, relative positional encoding).
+8. [Oct 2022] Rewrite backward pass to use Cutlass.
+9. [Oct 2022] Support SM70 GPUs (V100).
+10. [Oct 2022] Fuse rotary embedding.
+11. [Nov 2022] Support attention bias (e.g. ALiBi, relative positional encoding).
 
 ## Speedup and Memory Savings
 
