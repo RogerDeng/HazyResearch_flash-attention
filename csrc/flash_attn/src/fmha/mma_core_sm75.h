@@ -1,4 +1,7 @@
 // Adapted from cutlass/gemm/threadblock/default_mma_core_sm75.h
+// This is very similar, except we make it work for head_dim=128.
+// The original cutlass version only allows kK of the thread block to be
+// at most 64. Here we set kCrosswise = max(64, ThreadblockShape::kK) instead.
 
 /******************************************************************************
  * Copyright (c) 2022, Tri Dao.

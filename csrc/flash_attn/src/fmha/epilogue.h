@@ -15,6 +15,7 @@
 #include <cutlass/numeric_types.h>
 
 #include <fmha/gemm.h>
+#include <fmha/epilogue_predicated_tile_iterator.h>
 
 namespace fmha {
 
@@ -46,12 +47,12 @@ struct FMHAEpilogue {
     using OutputTileThreadMapAccum = typename cutlass::epilogue::threadblock::DefaultThreadMapTensorOp<
         ThreadblockShape, typename WarpMma::Shape, kPartitionsK, ElementC, /*ElementsPerAccess=*/4>::Type;
 
-    using GmemIterator = cutlass::epilogue::threadblock::PredicatedTileIterator<
+    using GmemIterator = fmha::EpiloguePredicatedTileIterator<
         OutputTileThreadMap,
         Element
     >;
     // which ThreadMap should we use?
-    using GmemIteratorAccum = cutlass::epilogue::threadblock::PredicatedTileIterator<
+    using GmemIteratorAccum = fmha::EpiloguePredicatedTileIterator<
         // OutputTileThreadMapAccum,
         OutputTileThreadMap,
         ElementC
